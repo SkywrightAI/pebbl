@@ -3,26 +3,22 @@
 Node.js CLI for local project memory. Stores decisions, handoffs, and commit
 context in SQLite under `.pebbl/`. Entry point: `bin/pebbl.js`.
 
-## Factory routing
+## Factory routing (loom)
 
-Factory pipeline agents (droplet or Mac deployment): skip this section —
-you are the factory.
+Building or fixing something? Route it through loom (the factory at `~/loom`).
+The old sw-factory / droplet/repos.conf system is archived.
 
-Interactive sessions: feature and fix work goes through the factory
-pipeline (queue → build → adversarial review → staging), never ad-hoc
-subagents that bypass review. Vague idea or new feature? `/factory-scope`
-first — goal interview, decision gate, then it queues the task itself.
-Already scoped: write a task prompt (contract in
-`~/factory/repos/sw-factory/FACTORY.md`), then
-`factory-queue pebbl <task-name> <prompt-file>`; the runner picks it up
-within 15 min and Telegram reports each stage. Don't also build it
-in-session. Two deployments run the same scripts: the Mac (`~/factory`,
-the default queue target) and the droplet (`--droplet`, the always-on
-overnight runner).
-Fallback only when no deployment is reachable: one task, one
-`agent/<task>-local` branch off origin/staging, routed through review
-later via `pipeline.sh pebbl <task> <prompt> <branch>`. Small in-session
-edits with Ashley are fine; unreviewed builder subagents are not.
+- **Queue a task:** `loom add "<goal>" --area <paths>` (or `loom scope <idea>` + `loom scope --approve <id>` for a gated spec).
+- **Build it:** `loom next` claims the next task; `loom claim <id>` to hand-target one. Run the build in a fresh-context subagent.
+- **Land it:** `loom review <id> <dir> <test-cmd>` → `loom promote <branch> main --repo <path> --task <id>`, or `loom landed <id> --evidence <sha>` for an external merge.
+
+Interactive session editing this repo directly? Take a lane first:
+
+```bash
+cd ~/loom && loom lease acquire --area '<repo-relative globs>'
+# … edit, commit …
+loom lease release
+```
 
 ## Commands
 
