@@ -329,12 +329,41 @@ function readEvents(pebblDir) {
 // both resolve to the exact same reducer; the sequential chain breaks if they
 // diverge. `fold` and `foldFull` are the imported references (see top of file).
 
+// The post-append fold+rebuild, made NON-FATAL. Once the event line is on
+// disk it IS the durable record; the folded view (events-view.md /
+// view.sqlite) is a derived projection the lazy read path (staleness.js
+// ensureFresh, wired into openDb) re-materializes on the next read anyway —
+// the watermark was never stamped, so the next read refolds. Letting a
+// projection failure propagate would break the FAIL-CLOSED contract below:
+// callers roll back their canonical write when appendLogEvent THROWS, and
+// rolling back a db row whose event DID land re-creates the exact fold/db
+// drift (in the other direction) this seam exists to prevent.
+function foldAndRebuild(pebblDir, rebuild) {
+  try {
+    const rows = fold(readEvents(pebblDir));
+    if (typeof rebuild === 'function') rebuild(rows);
+    return rows;
+  } catch (err) {
+    console.error(`pebbl: view rebuild skipped (${err.message}) — event appended; the next read refolds`);
+    return null;
+  }
+}
+
 // High-level entry: append one `append` event and rebuild the view inline,
 // the whole thing serialized by the per-store lock so a concurrent local
 // write can't interleave. `rebuild` is injected by the caller (log.js)
 // because the view-rebuild target (markdown/sqlite projection) lives there;
 // keeping fold/append decoupled from the projection keeps this module
-// reusable for later phases. Returns { event, rows }.
+// reusable for later phases. Returns { event, rows } (rows is null when the
+// derived-view rebuild failed — the event itself still landed).
+//
+// FAIL-CLOSED CONTRACT: a THROW from this function means the event was NOT
+// appended (lock acquisition, torn-line repair, or the append itself failed
+// before the line hit disk). Everything AFTER the physical append is
+// best-effort (foldAndRebuild above), so a caller may roll back its side of
+// the write on a throw without creating db/events divergence. log.js relies
+// on this to delete the freshly-inserted db row — the phantom-row drift the
+// identity resolver tolerates must never be CREATED by this path.
 function appendLogEvent(pebblDir, fields, rebuild, opts = {}) {
   return withLock(pebblDir, () => {
     const event = makeAppendEvent(pebblDir, fields);
@@ -343,8 +372,7 @@ function appendLogEvent(pebblDir, fields, rebuild, opts = {}) {
     // shared events.jsonl. The fold reads BOTH via readEvents, so the row shows
     // up in the view either way — only the git-transport side differs.
     appendEvent(pebblDir, event, { local: !!opts.local });
-    const rows = fold(readEvents(pebblDir));
-    if (typeof rebuild === 'function') rebuild(rows);
+    const rows = foldAndRebuild(pebblDir, rebuild);
     return { event, rows };
   });
 }
@@ -369,6 +397,9 @@ function appendLogEvent(pebblDir, fields, rebuild, opts = {}) {
 // without the supersession link, so the additive event path never silently fails
 // or stamps the wrong target. The canonical db.sqlite UPDATE in log.js still
 // records the legacy correction regardless. Returns { event, rows }.
+//
+// Same FAIL-CLOSED CONTRACT as appendLogEvent: a throw here means no event
+// was appended; the post-append fold/rebuild is best-effort.
 function appendCorrectLogEvent(pebblDir, fields, rebuild, opts = {}) {
   return withLock(pebblDir, () => {
     const { correctsLocalId, ...domain } = fields;
@@ -388,8 +419,7 @@ function appendCorrectLogEvent(pebblDir, fields, rebuild, opts = {}) {
       ? makeCorrectEvent(pebblDir, { ...domain, corrects: correctsEid })
       : makeAppendEvent(pebblDir, domain);
     appendEvent(pebblDir, event, { local: !!opts.local });
-    const rows = fold(readEvents(pebblDir));
-    if (typeof rebuild === 'function') rebuild(rows);
+    const rows = foldAndRebuild(pebblDir, rebuild);
     return { event, rows };
   });
 }

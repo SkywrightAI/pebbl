@@ -334,7 +334,12 @@ module.exports = function log(args) {
   // authoritative store, only the .md the promote gate scans.
   const mdEntry = formatEntry(ts, message, category, tier, source, topics);
   const md = `## ${ts} - ${redact(message)}\n${mdEntry.comment}\n\n`;
-  fs.appendFileSync(path.join(pebblDir, 'manual-logs.md'), md);
+  const mdPath = path.join(pebblDir, 'manual-logs.md');
+  // Remember the projection's pre-append size so the fail-closed rollback
+  // below can truncate this entry back OUT if the event append fails.
+  let mdSizeBefore = 0;
+  try { mdSizeBefore = fs.statSync(mdPath).size; } catch { /* fresh store */ }
+  fs.appendFileSync(mdPath, md);
 
   // Bi-temporal (v0.5): a new entry is the current belief, valid from now with
   // an open valid_to. importance (v0.7) is set at log time so a fresh row is
@@ -362,6 +367,15 @@ module.exports = function log(args) {
   // fold. The whole append+rebuild is serialized by the per-store lock so a
   // concurrent local write can't interleave. db.sqlite remains the source
   // of truth; this proves the committed-text path end to end alongside it.
+  //
+  // FAIL-CLOSED (fold/db id-drift, write-path root cause): the two stores must
+  // move together or not at all. appendLogEvent/appendCorrectLogEvent only
+  // THROW when the event was NOT appended (everything after the physical
+  // append is best-effort inside events.js), so the catch below can safely
+  // roll the canonical write BACK — delete the fresh db row, un-stamp the
+  // corrects target, truncate the .md projection — and exit non-zero. The old
+  // behavior ("events.jsonl append skipped", row kept) manufactured exactly
+  // the phantom db-only row that shifted every later id off the fold's.
   try {
     // P5 routing: a foundation entry on a PUBLIC remote is private-by-default
     // (lands in events.local.jsonl, gitignored) unless --share is passed. On a
@@ -402,8 +416,25 @@ module.exports = function log(args) {
       );
     }
   } catch (err) {
-    // Never let the new additive path break the existing, canonical write.
-    console.error(`pebbl: events.jsonl append skipped (${err.message})`);
+    // The event never landed — roll back the canonical write so db.sqlite,
+    // manual-logs.md and events.jsonl stay in lockstep (no orphan db row).
+    // Order: un-stamp the corrects target FIRST (restore the prior belief),
+    // then delete the new row, then truncate the projection.
+    try {
+      if (corrects != null) {
+        db.prepare(
+          'UPDATE logs SET valid_to = NULL, invalidated_by = NULL WHERE id = ? AND invalidated_by = ?'
+        ).run(corrects, newId);
+      }
+      db.prepare('DELETE FROM logs WHERE id = ?').run(newId);
+      fs.truncateSync(mdPath, mdSizeBefore);
+    } catch (rollbackErr) {
+      // A failed rollback is the loud, escalate-don't-hide case: the store IS
+      // divergent now and a human must look.
+      console.error(`pebbl: ROLLBACK FAILED after event-append failure (${rollbackErr.message}) — db.sqlite and events.jsonl may be out of sync; run pebbl doctor`);
+    }
+    console.error(`pebbl: entry NOT stored — events.jsonl append failed (${err.message})`);
+    process.exit(1);
   }
 
   // DEFAULT (no --strict) advisory: the entry IS stored (lossless), but we still
