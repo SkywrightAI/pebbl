@@ -162,6 +162,23 @@ describe('compact - execute helpers', () => {
     assert(msg.includes('added refresh tokens'));
   });
 
+  it('generateRollupMessage dedupes exact-duplicate source messages (runaway-logger shape)', () => {
+    // The 2026-07-12 loom store carried 45 identical entries from a runaway
+    // logger; the rollup must name the fact once, not 45 times. Distinct
+    // messages still all appear, in first-seen order.
+    const dupe = (ts) => ({ category: 'steering', topics: 'ops', timestamp: ts, message: 'guard false-positives at small corpus' });
+    const entries = [
+      dupe('2026-07-12T00:00:01Z'),
+      dupe('2026-07-12T00:00:02Z'),
+      { category: 'steering', topics: 'ops', timestamp: '2026-07-12T00:00:03Z', message: 'a distinct second fact' },
+      dupe('2026-07-12T00:00:04Z'),
+    ];
+    const msg = generateRollupMessage(entries);
+    assert.equal(msg.split('guard false-positives at small corpus').length - 1, 1, 'duplicate message appears exactly once');
+    assert(msg.includes('a distinct second fact'));
+    assert(msg.indexOf('guard false-positives') < msg.indexOf('a distinct second fact'), 'first-seen order preserved');
+  });
+
   // P3 (event-sourcing): the old `archiveEntries creates archive file` test is
   // DELETED. archiveEntries + archive/*.txt + archive.md no longer exist — the
   // append-only events.jsonl IS the durable archive (a rolled-up source stays in

@@ -130,7 +130,12 @@ function generateRollupMessage(entries) {
   // Label by quarter to match the compactor bucket key (entries in one group
   // share a quarter, not necessarily a month).
   const quarter = quarterOf(entries[0].timestamp);
-  const messages = entries.map(e => e.message.replace(/^\[rollup\]\s*/i, ''));
+  // DEDUPE exact-duplicate source messages (Set preserves first-seen order).
+  // A runaway logger can append the same fact dozens of times (the 2026-07-12
+  // loom store carried 45 identical entries); every duplicate is still rolled
+  // up and hidden — its eid sits in the supersede's rolls_up — but the rollup
+  // TEXT names each distinct fact once instead of repeating one line 45 times.
+  const messages = [...new Set(entries.map(e => e.message.replace(/^\[rollup\]\s*/i, '')))];
   return `[rollup] ${category} notes on ${topic} (${quarter}): ${messages.join('; ')}.`;
 }
 
