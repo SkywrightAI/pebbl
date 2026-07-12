@@ -1,5 +1,6 @@
 'use strict';
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { execSync } = require('child_process');
 const { parseArgs } = require('./args');
@@ -33,9 +34,67 @@ function extractPaths(message) {
   while ((m = re.exec(text)) !== null) {
     const tok = m[1];
     if (tok.startsWith('/') || tok.startsWith('~')) continue; // not repo-relative
+    // Prose artifact, not a path: "LOOP.md/AGENTS.md" or "pyproject.toml/uv.lock"
+    // is two FILENAMES joined by a slash-as-"or", so an INTERIOR segment carries
+    // a file extension. A real directory named `*.md`/`*.toml` is vanishingly
+    // rare; skipping these keeps the checker quiet enough to be trusted (its
+    // design bar) instead of flagging a "file" that never existed.
+    const segs = tok.split('/');
+    const interiorExt = new RegExp(`\\.(?:${PATH_EXT})$`);
+    if (segs.slice(0, -1).some(s => interiorExt.test(s))) continue;
     out.add(tok);
   }
   return [...out];
+}
+
+// Absolute directory paths NAMED in the message ("repo /abs/path", "at
+// /abs/path", or any absolute/~-home path token). A cross-repo entry — one
+// logged in THIS store about ANOTHER repo — cites relative paths that resolve
+// against the repo it names, not against this store's root. These tokens are
+// the candidate extra roots checkEntries resolves against, so such an entry is
+// only flagged when the file exists in NEITHER location. Tokens that carry a
+// known file extension are file citations, not roots, and are skipped; ~ is
+// expanded to the home dir. Existence-as-a-directory is checked at resolve
+// time (externalRootsOf below), not here, so this stays a pure token scan.
+function extractRepoRoots(message) {
+  const text = String(message || '').replace(/https?:\/\/\S+/g, ' '); // URLs aren't repo paths
+  // ≥2 segments for /abs (so a bare "/tmp" or a stray leading slash doesn't
+  // become a root), ≥1 segment for ~-home. Same boundary class extractPaths uses.
+  const re = /(?:^|[\s`'"(\[])((?:~|\/[\w.@-]+)(?:\/[\w.@-]+)+)/g;
+  const out = new Set();
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    // Strip trailing sentence punctuation ("… repo /a/b/harold.") — internal
+    // dots ("10.Code-Projects") survive because only the tail is trimmed.
+    const tok = m[1].replace(/[.,;:]+$/, '');
+    if (new RegExp(`\\.(?:${PATH_EXT})$`).test(tok)) continue; // a file, not a root
+    out.add(tok.startsWith('~') ? path.join(os.homedir(), tok.slice(1)) : tok);
+  }
+  return [...out];
+}
+
+// The named roots that actually EXIST as directories on this machine (a token
+// that isn't a real directory can't hide a missing file, so it's dropped).
+// For each named root we ALSO try its src/ subdirectory when one exists:
+// entries routinely cite a repo's files without the src/ prefix ("loom at
+// ~/loom ... capabilities/claim.ts" for src/capabilities/claim.ts). Naming the
+// root is the opt-in signal; the store's own repoRoot keeps plain resolution.
+function externalRootsOf(message) {
+  const isDir = (r) => {
+    try {
+      return fs.statSync(r).isDirectory();
+    } catch {
+      return false;
+    }
+  };
+  const out = [];
+  for (const r of extractRepoRoots(message)) {
+    if (!isDir(r)) continue;
+    out.push(r);
+    const src = path.join(r, 'src');
+    if (isDir(src)) out.push(src);
+  }
+  return out;
 }
 
 // Backtick-wrapped identifiers/calls (`foo`, `myFunc()`) for the opt-in --deep
@@ -64,13 +123,20 @@ const TIER_RANK = { foundation: 0, component: 1, detail: 2, fleeting: 3 };
 
 // Pure: entries + repo root → flagged entries (missing paths, plus missing
 // symbols when deep), highest-tier then newest first. Mutates nothing.
+//
+// Cross-repo resolution: when an entry NAMES another repo by absolute path
+// ("repo /Users/x/harold" citing src/lib.rs), its relative paths resolve
+// against that named root TOO — a citation is "missing" only when it exists in
+// NO candidate root. An entry that names no external root keeps the exact old
+// behavior (roots = [repoRoot] only).
 function checkEntries(entries, repoRoot, { deep = false } = {}) {
   const flagged = [];
   for (const e of entries) {
+    const roots = [repoRoot, ...externalRootsOf(e.message)];
     const missingPaths = extractPaths(e.message)
-      .filter(p => !fs.existsSync(path.resolve(repoRoot, p)));
+      .filter(p => !roots.some(r => fs.existsSync(path.resolve(r, p))));
     const missingSymbols = deep
-      ? extractSymbols(e.message).filter(s => !symbolExists(repoRoot, s))
+      ? extractSymbols(e.message).filter(s => !roots.some(r => symbolExists(r, s)))
       : [];
     if (missingPaths.length || missingSymbols.length) {
       flagged.push({ ...e, missingPaths, missingSymbols });
@@ -111,4 +177,4 @@ module.exports = function check(args) {
   }
 };
 
-module.exports._internal = { extractPaths, extractSymbols, checkEntries, TIER_RANK };
+module.exports._internal = { extractPaths, extractSymbols, extractRepoRoots, externalRootsOf, checkEntries, TIER_RANK };

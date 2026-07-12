@@ -166,6 +166,22 @@ describe('doctor - detectMissing (reuses check.js)', () => {
     assert.equal(out[0].entry.id, 2);
     assert.deepEqual(out[0].entry.missingPaths, ['src/missing.js']);
   });
+
+  it('spares a cross-repo entry whose cited file exists in the repo it NAMES', () => {
+    // The loom false-positive shape: an entry logged in THIS store about
+    // ANOTHER repo ("repo /abs/path") citing that repo's relative paths.
+    const store = tmp();                 // doctor's repoRoot — file not here
+    const other = tmp();                 // the named repo — file lives here
+    fs.mkdirSync(path.join(other, 'src'));
+    fs.writeFileSync(path.join(other, 'src/lib.rs'), 'x');
+    const entries = [
+      entry({ id: 1, message: `HAROLD (repo ${other}, Rust): core in src/lib.rs` }),
+      entry({ id: 2, message: `HAROLD (repo ${other}, Rust): gone src/nope.rs` }),
+    ];
+    const out = detectMissing(entries, store, {});
+    assert.equal(out.length, 1, 'only the nowhere-existing citation is flagged');
+    assert.equal(out[0].entry.id, 2);
+  });
 });
 
 // ── detector 4: handoff health (lifecycle) ────────────────────────────────────
