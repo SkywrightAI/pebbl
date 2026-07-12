@@ -272,6 +272,14 @@ describe('doctor - detectNonAtomic', () => {
     assert.equal(detectNonAtomic([entry({ id: 1, message: 'chose to refactor the module schema' })], []).length, 0);
   });
 
+  it('does NOT flag a compaction [rollup] entry (multi-fact by construction)', () => {
+    const rolled = entry({
+      id: 1,
+      message: '[rollup] decision notes on core (2026-Q3): chose to refactor the module; changed the schema; wired the api endpoint.',
+    });
+    assert.equal(detectNonAtomic([rolled], rules, {}).length, 0, 'doctor must not ask the operator to split a rollup');
+  });
+
   it('is report-only: never mutates the input entries', () => {
     const entries = [entry({ id: 1, message: 'chose to refactor the module and change the schema' })];
     const before = JSON.stringify(entries);
