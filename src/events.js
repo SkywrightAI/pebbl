@@ -107,11 +107,22 @@ function lessonFields({ signature, fix_altitude_claimed, changed_files } = {}) {
   return out;
 }
 
+// Optional `source` tail (human|agent|hook). PRESENT-ONLY like lessonFields:
+// stamped on the event only when the caller supplied a real value, so an event
+// without it serializes byte-for-byte as before. fold.js already reads
+// e.source first (row.source = e.source || actorToSource(e)) and defaults to
+// 'human' when absent — which is exactly why hook/agent writes must carry it:
+// without the field, a rebuild-from-events silently re-labels their rows as
+// 'human' (fold/db source drift).
+function sourceField({ source } = {}) {
+  return source ? { source: String(source) } : {};
+}
+
 // Build an `append` event envelope. Caller supplies the domain fields; the
 // envelope head (eid/ts/emitted_at/actor/v) comes from makeEnvelope. The
-// optional lesson tail (signature/fix_altitude_claimed/changed_files) is spread
-// in ONLY when present (see lessonFields) so a non-lesson append is byte-
-// identical to before.
+// optional source + lesson tails (source, signature/fix_altitude_claimed/
+// changed_files) are spread in ONLY when present (see sourceField /
+// lessonFields) so a plain append is byte-identical to before.
 function makeAppendEvent(pebblDir, fields = {}) {
   const { ts, category, tier, message, topics, actor } = fields;
   return {
@@ -122,6 +133,7 @@ function makeAppendEvent(pebblDir, fields = {}) {
     topics: Array.isArray(topics)
       ? topics
       : (topics ? String(topics).split(',').map((t) => t.trim()).filter(Boolean) : []),
+    ...sourceField(fields),
     ...lessonFields(fields),
   };
 }
@@ -149,7 +161,9 @@ function makeCorrectEvent(pebblDir, fields = {}) {
       : (topics ? String(topics).split(',').map((t) => t.trim()).filter(Boolean) : []),
     corrects: corrects || null,
     // A re-fix recorded as a `correct` (e.g. the GLM-judge saga's later attempt)
-    // carries the SAME optional lesson tail as an append — additive, present-only.
+    // carries the SAME optional source + lesson tails as an append — additive,
+    // present-only.
+    ...sourceField(fields),
     ...lessonFields(fields),
   };
 }

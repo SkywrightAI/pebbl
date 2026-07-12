@@ -220,6 +220,7 @@ module.exports.buildGroups = buildGroups;
 module.exports.regenerateMarkdown = regenerateMarkdown;
 module.exports.generateRollupMessage = generateRollupMessage;
 module.exports.unionTopics = unionTopics;
+module.exports.buildRowEidResolver = buildRowEidResolver;
 
 function previewMode(db, threshold, componentThreshold) {
   const { groups, ambiguous, fleeting, protected: protectedDecisions } = buildGroups(db, threshold, componentThreshold);
@@ -301,18 +302,24 @@ function executeMode(db, pebblDir, config, resolveRaw) {
   // buildGroups read db.sqlite, whose rows carry a LOCAL integer `id`. The
   // events the fold reads carry the only shared identity — the eid. To write a
   // supersede whose `rolls_up` points at the rolled-up source entries (and a
-  // resolve/expire whose `target` names one), we translate each source row's
-  // int id -> its eid through the SAME fold that builds the read model: its
-  // surviving rows carry both `id` (the assigned local int) and `eid`.
-  // (design IDs para: "P1 already maps eid->local-int, so buildGroups' rows
-  // carry an eid to point at.") We never fabricate an eid: a row whose int has
-  // no eid in the map is skipped from the batch with a loud warning (the
-  // Friction the contract names — escalate, don't invent).
-  const intToEid = buildIntToEidMap(pebblDir);
-  const eidFor = (id, what) => {
-    const eid = intToEid.get(id);
+  // resolve/expire whose `target` names one), we translate each source ROW ->
+  // its eid through the SAME fold that builds the read model, keyed by row
+  // IDENTITY (timestamp + message), NOT by the local integer id. The old
+  // positional int->eid map assumed db.sqlite's AUTOINCREMENT ids equal the
+  // fold's renumbered ids; any db-only row (e.g. a pre-fix commit-capture row
+  // that never got an event — see log-commit.js) shifts every later id, which
+  // SILENTLY mapped rows to the wrong eid and dropped the top ids with the
+  // "fold/db id drift" warning, leaving them permanently un-compactable.
+  // Identity survives that drift: the (ts, message) pair is written identically
+  // to both stores by every event-writing path. We still never fabricate an
+  // eid: a row with no matching event (a genuinely event-less legacy/phantom
+  // row) is skipped from the batch with a loud warning (the Friction the
+  // contract names — escalate, don't invent).
+  const resolveEid = buildRowEidResolver(pebblDir);
+  const eidFor = (row, what) => {
+    const eid = resolveEid(row);
     if (!eid) {
-      console.warn(`Warning: no event eid for ${what} id ${id} (fold/db id drift) — skipping it from this compaction.`);
+      console.warn(`Warning: no event eid for ${what} id ${row.id} (row has no matching event in events.jsonl) — skipping it from this compaction.`);
     }
     return eid || null;
   };
@@ -331,7 +338,7 @@ function executeMode(db, pebblDir, config, resolveRaw) {
   for (const [, entries] of groups) {
     const rolls_up = [];
     for (const e of entries) {
-      const eid = eidFor(e.id, 'rollup source');
+      const eid = eidFor(e, 'rollup source');
       if (eid) rolls_up.push(eid);
     }
     if (rolls_up.length === 0) continue; // nothing resolvable to roll up
@@ -346,7 +353,10 @@ function executeMode(db, pebblDir, config, resolveRaw) {
   }
 
   for (const [id, action] of resolveMap) {
-    const eid = eidFor(id, 'resolve target');
+    // The validate loop above guaranteed the id exists; fetch the row so the
+    // identity resolver has its (timestamp, message) key.
+    const row = db.prepare('SELECT id, timestamp, message FROM logs WHERE id = ?').get(id);
+    const eid = eidFor(row, 'resolve target');
     if (!eid) continue;
     if (action === 'foundation') {
       events.push(makeResolveEvent(pebblDir, { target: eid, to_tier: 'foundation' }));
@@ -360,7 +370,7 @@ function executeMode(db, pebblDir, config, resolveRaw) {
   }
 
   for (const e of expiredFleeting) {
-    const eid = eidFor(e.id, 'expired fleeting');
+    const eid = eidFor(e, 'expired fleeting');
     if (eid) events.push(makeExpireEvent(pebblDir, { target: eid }));
   }
 
@@ -394,24 +404,36 @@ function executeMode(db, pebblDir, config, resolveRaw) {
   console.log('Done.');
 }
 
-// Build the int -> eid translation off the SAME fold that produces the read
-// model: foldFull(events).logs carries every surviving row's assigned local
-// integer `id` AND its `eid`. On a store whose db.sqlite int ids align with the
-// fold's (the common case — both assign 1..N in (ts) order), this resolves a
-// db.sqlite row's int id to its event eid. Returns a Map<int, eid>.
-function buildIntToEidMap(pebblDir) {
-  const map = new Map();
+// Build the row -> eid translation off the SAME fold that produces the read
+// model, keyed by row IDENTITY (timestamp + message) instead of the local
+// integer id. Both halves of every event-writing path stamp the SAME ts and
+// message into db.sqlite and events.jsonl (log.js / log-commit.js), and no
+// path ever mutates them afterwards, so the pair survives the id drift a
+// db-only phantom row causes (an AUTOINCREMENT id shifts; an identity doesn't).
+// Exact-duplicate rows (same ts AND message — e.g. a hook double-fire inside
+// one millisecond) are handled as a MULTISET: eids queue up in fold order and
+// each resolve consumes one, so two identical rows pair with two distinct
+// eids deterministically. Returns resolve(row) -> eid | null.
+function buildRowEidResolver(pebblDir) {
+  const byIdentity = new Map(); // "ts\0message" -> [eid, ...] in fold order
   let projection;
   try {
     projection = foldFull(readEvents(pebblDir));
   } catch (err) {
     console.warn(`Warning: could not read events for eid map (${err.message}).`);
-    return map;
+    return () => null;
   }
   for (const row of projection.logs) {
-    if (row.id != null && row.eid) map.set(row.id, row.eid);
+    if (!row.eid) continue;
+    const key = `${row.timestamp}\u0000${row.message}`;
+    if (!byIdentity.has(key)) byIdentity.set(key, []);
+    byIdentity.get(key).push(row.eid);
   }
-  return map;
+  return (row) => {
+    if (!row) return null;
+    const q = byIdentity.get(`${row.timestamp}\u0000${row.message}`);
+    return q && q.length > 0 ? q.shift() : null;
+  };
 }
 
 // Rebuild the read model from events.jsonl after a compaction batch is
