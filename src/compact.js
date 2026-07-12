@@ -8,10 +8,14 @@ const { loadConfig, ensureProjectFiles } = require('./rubric');
 const {
   readEvents,
   foldFull,
+  appendEvent,
   appendEventBatch,
   makeSupersedeEvent,
   makeResolveEvent,
   makeExpireEvent,
+  makeAppendEvent,
+  makeCommitEvent,
+  makeEnvelope,
 } = require('./events');
 const {
   renderManualLogsMd,
@@ -221,6 +225,8 @@ module.exports.regenerateMarkdown = regenerateMarkdown;
 module.exports.generateRollupMessage = generateRollupMessage;
 module.exports.unionTopics = unionTopics;
 module.exports.buildRowEidResolver = buildRowEidResolver;
+module.exports.backfillNonEventRows = backfillNonEventRows;
+module.exports.rebuildReadModelFromEvents = rebuildReadModelFromEvents;
 
 function previewMode(db, threshold, componentThreshold) {
   const { groups, ambiguous, fleeting, protected: protectedDecisions } = buildGroups(db, threshold, componentThreshold);
@@ -436,6 +442,157 @@ function buildRowEidResolver(pebblDir) {
   };
 }
 
+// ── rebuild-preservation backfill ────────────────────────────────────────────
+//
+// rebuildReadModelFromEvents below OVERWRITES db.sqlite from the events fold.
+// Anything in db.sqlite that never got an event is therefore DESTROYED by a
+// rebuild: the commits table (the git post-commit hook wrote db-only rows
+// until log-commit.js started appending `commit` events), any handoff (the
+// handoff write path is still db-only), and legacy phantom logs rows. That is
+// exactly how the loom store lost every captured commit in the 2026-07-12
+// incident run. Before folding, mint the missing events for those rows —
+// append-only, same identity resolution the compaction eid map uses
+// ((timestamp, message) multiset for logs; hash multiset for commits;
+// (timestamp, summary) for handoffs) — so the rebuild REGENERATES them
+// instead of wiping them. Idempotent: a row whose event already exists
+// consumes its identity slot and mints nothing.
+//
+// Boundary: only LIVE logs rows (valid_to IS NULL) are backfilled as plain
+// appends — a corrected phantom row's timeline cannot be reconstructed
+// without inventing a correct-chain, so it is skipped with a loud warning
+// (escalate, don't invent). Phantom link fields (corrects/relates_to ints)
+// are dropped for the same reason.
+function backfillNonEventRows(pebblDir) {
+  const dbPath = path.join(pebblDir, 'db.sqlite');
+  if (!fs.existsSync(dbPath)) return { logs: 0, commits: 0, handoffs: 0 };
+
+  const events = readEvents(pebblDir);
+
+  // Identity multisets from the events that materialize rows.
+  const logIdentity = new Map();    // "ts\0message" -> count
+  const commitHashes = new Map();   // hash -> count
+  const handoffIdentity = new Map(); // "ts\0summary" -> count
+  const bump = (map, key) => map.set(key, (map.get(key) || 0) + 1);
+  for (const e of events) {
+    if (!e || typeof e !== 'object') continue;
+    if (e.type === 'append' || e.type === 'correct' || e.type === 'supersede') {
+      bump(logIdentity, `${e.ts} ${e.message || ''}`);
+    } else if (e.type === 'commit') {
+      bump(commitHashes, e.hash || '');
+    } else if (e.type === 'handoff-open') {
+      bump(handoffIdentity, `${e.ts} ${e.summary || ''}`);
+    }
+  }
+  const consume = (map, key) => {
+    const n = map.get(key) || 0;
+    if (n <= 0) return false;
+    map.set(key, n - 1);
+    return true;
+  };
+
+  const Database = require('better-sqlite3');
+  const db = new Database(dbPath, { readonly: true });
+  const minted = { logs: 0, commits: 0, handoffs: 0 };
+  let skippedCorrected = 0;
+  try {
+    // logs: live db-only rows -> plain append events.
+    let logRows = [];
+    try {
+      logRows = db.prepare(
+        'SELECT timestamp, source, category, tier, message, topics, valid_from, valid_to FROM logs ORDER BY timestamp ASC, id ASC'
+      ).all();
+    } catch { /* no logs table — nothing to preserve */ }
+    for (const row of logRows) {
+      if (consume(logIdentity, `${row.timestamp} ${row.message}`)) continue;
+      if (row.valid_to != null) { skippedCorrected += 1; continue; }
+      appendEvent(pebblDir, makeAppendEvent(pebblDir, {
+        ts: row.timestamp,
+        category: row.category,
+        tier: row.tier,
+        message: row.message,
+        topics: row.topics,
+        source: row.source,
+      }));
+      minted.logs += 1;
+    }
+
+    // commits: db-only capture rows -> commit events (hash is the identity).
+    let commitRows = [];
+    try {
+      commitRows = db.prepare(
+        'SELECT timestamp, hash, message, files FROM commits ORDER BY timestamp ASC, id ASC'
+      ).all();
+    } catch { /* no commits table */ }
+    for (const row of commitRows) {
+      if (consume(commitHashes, row.hash)) continue;
+      appendEvent(pebblDir, makeCommitEvent(pebblDir, {
+        ts: row.timestamp,
+        hash: row.hash,
+        message: row.message,
+        files: row.files,
+      }));
+      minted.commits += 1;
+    }
+
+    // handoffs: db-only rows -> handoff-open (+ handoff-close when closed).
+    // session_entries/session_commits are convenience back-links; the int/hash
+    // arrays are carried VERBATIM only where the fold can survive them —
+    // session_entries ints cannot resolve to eids here (the fold drops
+    // unresolvable refs), so they are dropped like migrate --repair drops a
+    // dangling element. Summary/done/todo/blocked/topics/docs are lossless.
+    let handoffRows = [];
+    try {
+      handoffRows = db.prepare(
+        'SELECT timestamp, summary, done, todo, blocked, topics, source, session_commits, status, closed_at, docs FROM handoffs ORDER BY id ASC'
+      ).all();
+    } catch { /* no handoffs table */ }
+    for (const row of handoffRows) {
+      if (consume(handoffIdentity, `${row.timestamp} ${row.summary}`)) continue;
+      let sessionCommits = [];
+      try {
+        const parsed = JSON.parse(row.session_commits || '[]');
+        if (Array.isArray(parsed)) sessionCommits = parsed;
+      } catch { /* malformed back-link array — drop, the handoff text survives */ }
+      const open = {
+        ...makeEnvelope(pebblDir, 'handoff-open', { ts: row.timestamp }),
+        summary: row.summary || '',
+        done: row.done || null,
+        todo: row.todo || null,
+        blocked: row.blocked || null,
+        topics: row.topics || null,
+        source: row.source || 'agent',
+        session_entries: [],
+        session_commits: sessionCommits,
+        docs: row.docs || null,
+      };
+      appendEvent(pebblDir, open);
+      if (String(row.status) === 'closed') {
+        appendEvent(pebblDir, {
+          ...makeEnvelope(pebblDir, 'handoff-close', { ts: row.closed_at || row.timestamp }),
+          handoff: open.eid,
+        });
+      }
+      minted.handoffs += 1;
+    }
+  } finally {
+    db.close();
+  }
+
+  if (minted.logs + minted.commits + minted.handoffs > 0) {
+    console.warn(
+      `pebbl: backfilled ${minted.commits} commit(s), ${minted.logs} log row(s), ${minted.handoffs} handoff(s) ` +
+      'into events.jsonl (db-only rows with no event — preserved across the rebuild).'
+    );
+  }
+  if (skippedCorrected > 0) {
+    console.warn(
+      `Warning: ${skippedCorrected} superseded db-only log row(s) had no event and were NOT backfilled ` +
+      '(a corrected phantom cannot be reconstructed append-only); their history remains in the pre-rebuild markdown.'
+    );
+  }
+  return minted;
+}
+
 // Rebuild the read model from events.jsonl after a compaction batch is
 // appended. The fold hides rolled-up / resolved / expired entries (their eids
 // sit in a live supersede's rolls_up or an expire's target) and surfaces the
@@ -445,7 +602,14 @@ function buildRowEidResolver(pebblDir) {
 // view.sqlite from the one folded projection, so `pebbl context` / search see
 // the compacted state. db.sqlite is a REBUILT index here, never edited in place
 // — the destructive INSERT/DELETE/UPDATE is gone.
+//
+// PRESERVATION: the backfill above runs FIRST, so any db-only capture rows
+// (commits, handoffs, live phantom logs) are minted into events.jsonl before
+// the fold that regenerates db.sqlite — a rebuild can no longer destroy
+// rows that were never event-backed. Caller must hold the store lock
+// (every caller reaches here inside appendEventBatch's withLock).
 function rebuildReadModelFromEvents(pebblDir) {
+  backfillNonEventRows(pebblDir);
   const projection = foldFull(readEvents(pebblDir));
 
   // Markdown projections (browsing surfaces) from the byte-identical emitters.
