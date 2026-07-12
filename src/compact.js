@@ -625,16 +625,26 @@ function rebuildReadModelFromEvents(pebblDir) {
   writeViewSqlite(projection, path.join(pebblDir, 'view.sqlite'));
   writeViewSqlite(projection, path.join(pebblDir, 'db.sqlite'));
 
-  // writeViewSqlite uses the view schema (no `meta` table). The canonical read
-  // path opens db.sqlite through openDb -> migrate(), which keys off
-  // meta.schema_version; stamp it to the current version so a post-compaction
-  // read does NOT re-run (and re-log) every historical migration. Additive,
-  // matches db.js's schema floor.
+  // writeViewSqlite writes the CURRENT read contract (the post-v0.7 shape:
+  // rerank columns present, importance tier-derived) but no schema_version
+  // row. The canonical read path opens db.sqlite through openDb -> migrate(),
+  // which keys off meta.schema_version, so a rebuilt store must land at the
+  // CURRENT version — a stale stamp makes the next read re-run (and
+  // re-announce) every migration above it on EVERY post-rebuild read (the
+  // "migrated db to v0.6/v0.7" noise after each compaction). Stamp the 0.5
+  // floor (the last shape this rebuild guaranteed before the rerank columns),
+  // then run the real migration chain ONCE, quietly, here inside the rebuild.
+  // Running the chain instead of hardcoding the current number keeps this
+  // self-maintaining: a future v0.8 data backfill runs here too, and the
+  // stamp can never drift below what migrate() considers current (DRY — one
+  // place owns "current").
+  const { migrate } = require('./migrate');
   const Database = require('better-sqlite3');
   const cdb = new Database(path.join(pebblDir, 'db.sqlite'));
   try {
     cdb.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
     cdb.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)").run('0.5');
+    migrate(cdb, { quiet: true });
   } finally {
     cdb.close();
   }

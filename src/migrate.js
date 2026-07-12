@@ -37,19 +37,26 @@ function migrate_v02_to_v03(db) {
   db.prepare("UPDATE logs SET tier = 'component' WHERE tier = 'signal'").run();
 }
 
-function migrate(db) {
+// opts.quiet: suppress the per-step stderr announcements. The announcements
+// exist to tell an OPERATOR their store just changed shape under them; a
+// caller that migrates a db it just BUILT itself (compact.js's
+// rebuildReadModelFromEvents bringing a rebuilt db.sqlite to the current
+// version) passes quiet — the operator's store didn't change, only a derived
+// artifact caught up, and announcing it reads as alarming re-migration noise.
+function migrate(db, opts = {}) {
+  const note = opts.quiet ? () => {} : (msg) => console.error(msg);
   db.exec(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
   let version = getVersion(db);
 
   if (version < 0.2) {
     migrate_v01_to_v02(db);
     setVersion(db, 0.2);
-    console.error('pebbl: migrated db to v0.2');
+    note('pebbl: migrated db to v0.2');
   }
   if (version < 0.3) {
     migrate_v02_to_v03(db);
     setVersion(db, 0.3);
-    console.error('pebbl: migrated db to v0.3 (signal → component tier)');
+    note('pebbl: migrated db to v0.3 (signal → component tier)');
   }
   if (version < 0.4) {
     const columns = db.prepare('PRAGMA table_info(handoffs)').all();
@@ -60,7 +67,7 @@ function migrate(db) {
       }
     }
     setVersion(db, 0.4);
-    console.error('pebbl: migrated db to v0.4 (handoffs.docs)');
+    note('pebbl: migrated db to v0.4 (handoffs.docs)');
   }
   if (version < 0.5) {
     // Bi-temporal supersession: stamp WHEN a belief stopped being true instead
@@ -86,7 +93,7 @@ function migrate(db) {
     `).run();
     db.exec('CREATE INDEX IF NOT EXISTS idx_logs_valid_to ON logs(valid_to)');
     setVersion(db, 0.5);
-    console.error('pebbl: migrated db to v0.5 (bi-temporal corrects)');
+    note('pebbl: migrated db to v0.5 (bi-temporal corrects)');
   }
   if (version < 0.6) {
     // Rerank signals: columns the future weighted score reads. Additive, no
@@ -105,7 +112,7 @@ function migrate(db) {
       db.exec('ALTER TABLE logs ADD COLUMN last_accessed TEXT DEFAULT NULL;');
     }
     setVersion(db, 0.6);
-    console.error('pebbl: migrated db to v0.6 (rerank signals)');
+    note('pebbl: migrated db to v0.6 (rerank signals)');
   }
   if (version < 0.7) {
     // Rerank importance backfill: v0.6 added the importance column with a 0
@@ -130,7 +137,7 @@ function migrate(db) {
       backfill();
     }
     setVersion(db, 0.7);
-    console.error('pebbl: migrated db to v0.7 (tier-derived importance backfill)');
+    note('pebbl: migrated db to v0.7 (tier-derived importance backfill)');
   }
 }
 
