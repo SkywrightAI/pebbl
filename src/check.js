@@ -73,26 +73,36 @@ function extractRepoRoots(message) {
   return [...out];
 }
 
+function isDir(r) {
+  try {
+    return fs.statSync(r).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+// A root plus its src/ subdirectory when one exists. Entries routinely cite a
+// repo's files without the src/ prefix ("capabilities/claim.ts" for
+// src/capabilities/claim.ts) — and that shorthand is just as common for the
+// STORE'S OWN repo as for a named external one (the loom store's own entries
+// cite "capabilities/queue.ts", "foundation/jsonstore.ts"). ONE helper shared
+// by the own-root and named-root resolution so the two cannot drift (DRY).
+function withSrc(root) {
+  const out = [root];
+  const src = path.join(root, 'src');
+  if (isDir(src)) out.push(src);
+  return out;
+}
+
 // The named roots that actually EXIST as directories on this machine (a token
 // that isn't a real directory can't hide a missing file, so it's dropped).
-// For each named root we ALSO try its src/ subdirectory when one exists:
-// entries routinely cite a repo's files without the src/ prefix ("loom at
-// ~/loom ... capabilities/claim.ts" for src/capabilities/claim.ts). Naming the
-// root is the opt-in signal; the store's own repoRoot keeps plain resolution.
+// For each named root we ALSO try its src/ subdirectory when one exists
+// (withSrc above — same shorthand rule the store's own root gets).
 function externalRootsOf(message) {
-  const isDir = (r) => {
-    try {
-      return fs.statSync(r).isDirectory();
-    } catch {
-      return false;
-    }
-  };
   const out = [];
   for (const r of extractRepoRoots(message)) {
     if (!isDir(r)) continue;
-    out.push(r);
-    const src = path.join(r, 'src');
-    if (isDir(src)) out.push(src);
+    out.push(...withSrc(r));
   }
   return out;
 }
@@ -127,12 +137,15 @@ const TIER_RANK = { foundation: 0, component: 1, detail: 2, fleeting: 3 };
 // Cross-repo resolution: when an entry NAMES another repo by absolute path
 // ("repo /Users/x/harold" citing src/lib.rs), its relative paths resolve
 // against that named root TOO — a citation is "missing" only when it exists in
-// NO candidate root. An entry that names no external root keeps the exact old
-// behavior (roots = [repoRoot] only).
+// NO candidate root. The store's own repoRoot gets the same src/-shorthand
+// fallback (withSrc): a src-layout repo's entries cite "capabilities/queue.ts"
+// for src/capabilities/queue.ts, and flagging those as missing was a standing
+// false positive against the store's own tree (the 2026-07-12 loom triage).
 function checkEntries(entries, repoRoot, { deep = false } = {}) {
+  const ownRoots = withSrc(repoRoot);
   const flagged = [];
   for (const e of entries) {
-    const roots = [repoRoot, ...externalRootsOf(e.message)];
+    const roots = [...ownRoots, ...externalRootsOf(e.message)];
     const missingPaths = extractPaths(e.message)
       .filter(p => !roots.some(r => fs.existsSync(path.resolve(r, p))));
     const missingSymbols = deep

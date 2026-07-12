@@ -142,6 +142,38 @@ describe('check - checkEntries (cross-repo roots)', () => {
     const entries = [entry({ message: `SELF-FIX (repo at ${other}): reuse capabilities/claim.js` })];
     assert.equal(checkEntries(entries, store).length, 0);
   });
+
+  it("resolves a src/-shorthand citation against the store's OWN repo src/ dir", () => {
+    // The loom-triage false positive: the store's own entries cite
+    // "capabilities/queue.js" for src/capabilities/queue.js, naming no root.
+    const repo = tmp();
+    fs.mkdirSync(path.join(repo, 'src/capabilities'), { recursive: true });
+    fs.writeFileSync(path.join(repo, 'src/capabilities/queue.js'), 'x');
+    const entries = [entry({ message: 'single queue impl (capabilities/queue.js: addTask/nextTask)' })];
+    assert.equal(checkEntries(entries, repo).length, 0, 'exists under own src/ → not missing');
+  });
+
+  it('a citation missing from BOTH the own root and its src/ is still flagged', () => {
+    const repo = tmp();
+    fs.mkdirSync(path.join(repo, 'src'));
+    const entries = [entry({ message: 'the gone capabilities/vanished.js does Y' })];
+    const flagged = checkEntries(entries, repo);
+    assert.equal(flagged.length, 1, 'missing under root AND src/ → flagged');
+    assert.deepEqual(flagged[0].missingPaths, ['capabilities/vanished.js']);
+  });
+
+  it('a repo with no src/ dir keeps plain own-root resolution (no phantom root)', () => {
+    const repo = tmp(); // no src/ subdir at all
+    fs.writeFileSync(path.join(repo, 'present.js'), 'x');
+    fs.mkdirSync(path.join(repo, 'lib'));
+    fs.writeFileSync(path.join(repo, 'lib/here.js'), 'x');
+    const flagged = checkEntries([
+      entry({ id: 1, message: 'uses lib/here.js for X' }),
+      entry({ id: 2, message: 'the gone lib/gone.js does Y' }),
+    ], repo);
+    assert.equal(flagged.length, 1);
+    assert.equal(flagged[0].id, 2);
+  });
 });
 
 describe('check - --deep symbol grep (git-backed)', () => {
