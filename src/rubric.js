@@ -196,6 +196,16 @@ function classifyEntryMulti(rules, message) {
 // also kills a false positive the detector had on "fat" session logs that trip
 // several content rules. A message that matches no rule is atomic too (nothing
 // to split). Reuses classifyEntryMulti — no second scorer.
+//
+// [rollup] entries are ALWAYS atomic too. A rollup is the COMPACTOR'S OWN
+// OUTPUT — generateRollupMessage deliberately concatenates many source
+// messages into one row, so it trips several categories by construction.
+// Flagging it tells the operator to split what compaction just joined (the
+// tool fighting its own compactor). The marker is the same `[rollup] ` prefix
+// compact.js writes (generateRollupMessage) and strips when re-rolling, so
+// there is one definition of "this row is a rollup". Side effect on --strict:
+// a hand-logged "[rollup] ..." message also passes — acceptable; the prefix
+// is a machine marker no honest write path uses.
 function atomicityOf(rules, message) {
   const m = classifyEntryMulti(rules, message);
   if (!m) return { categories: [], nonAtomic: false, reason: null };
@@ -204,6 +214,10 @@ function atomicityOf(rules, message) {
   // (uncategorized is the highest-priority category, so a [session] entry that
   // also trips content rules still resolves its primary to uncategorized.)
   if (m.category === 'uncategorized' || m.tier === 'fleeting') {
+    return { categories, nonAtomic: false, reason: null };
+  }
+  // Compaction rollups are multi-fact by construction — never flag them.
+  if (/^\[rollup\]/i.test(String(message || ''))) {
     return { categories, nonAtomic: false, reason: null };
   }
   const len = String(message || '').length;

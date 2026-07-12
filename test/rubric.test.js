@@ -262,6 +262,17 @@ describe('atomicityOf — the shared non-atomic predicate', () => {
     assert.strictEqual(a.reason, null);
     assert.deepStrictEqual(a.categories, []);
   });
+
+  it('a [rollup] entry is ALWAYS atomic — the compactor made it multi-fact on purpose', () => {
+    // Trips decision + structure + data + integration; a plain entry with this
+    // message would be non-atomic. The rollup prefix (what compact.js's
+    // generateRollupMessage writes) exempts it — doctor must not tell the
+    // operator to split what compaction just joined.
+    const rolled = '[rollup] decision notes on core (2026-Q3): chose to refactor the module; changed the schema; wired the api endpoint.';
+    const a = atomicityOf(rules, rolled);
+    assert.strictEqual(a.nonAtomic, false, 'a compaction rollup must never be flagged non-atomic');
+    assert.strictEqual(a.reason, null);
+  });
 });
 
 describe('loadRubric', () => {
