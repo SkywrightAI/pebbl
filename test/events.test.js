@@ -25,6 +25,14 @@ const { withLock } = require('../src/lock');
 
 const PEBBL_BIN = path.join(__dirname, '..', 'bin', 'pebbl.js');
 
+// These tests make their OWN git commits inside stores whose events.jsonl is
+// force-added (tracked). The post-commit capture hook would append a
+// commit-capture event right after every such commit — dirtying the tracked
+// file and skewing the choreography — so capture is disabled for the whole
+// file (children inherit the env). Capture itself is covered by
+// test/compact-id-drift.test.js.
+process.env.PEBBL_SKIP_CAPTURE = '1';
+
 function tmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'pebbl-ev-'));
 }

@@ -383,17 +383,20 @@ module.exports = function log(args) {
     // events/shared reads exactly as the legacy db.sqlite UPDATE above hides it.
     // Without --corrects this stays a plain `append`. The correcting entry IS the
     // new live belief, so it carries the same domain payload either way.
+    // `source` rides the event too (present-only, see events.sourceField): the
+    // DB row above stores it, so the event must as well or a rebuild-from-
+    // events re-labels agent/hook rows as 'human' (fold/db source drift).
     if (corrects != null) {
       appendCorrectLogEvent(
         pebblDir,
-        { ts, category, tier, message, topics, correctsLocalId: corrects },
+        { ts, category, tier, message, topics, source, correctsLocalId: corrects },
         (rows) => rebuildEventsView(pebblDir, rows),
         { local },
       );
     } else {
       appendLogEvent(
         pebblDir,
-        { ts, category, tier, message, topics },
+        { ts, category, tier, message, topics, source },
         (rows) => rebuildEventsView(pebblDir, rows),
         { local },
       );
@@ -465,3 +468,6 @@ function displayEntry(e) {
 
 module.exports.displayEntry = displayEntry;
 module.exports.shouldRouteLocal = shouldRouteLocal;
+// Reused by log-commit.js so the commit-capture write path rebuilds the SAME
+// folded view artifacts this path does (one rebuild seam, no second copy).
+module.exports.rebuildEventsView = rebuildEventsView;

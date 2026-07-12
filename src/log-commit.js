@@ -4,12 +4,20 @@ const path = require('path');
 const { findPebblDir } = require('./find-pebbl');
 const { openDb } = require('./db');
 const { loadRubric, classifyEntry } = require('./rubric');
+const { appendLogEvent } = require('./events');
+const { rebuildEventsView } = require('./log');
 // Projection-boundary secret mask: commit-log.md is committed + gate-scanned;
 // the DB (commits/logs tables below) keeps the original commit message.
 const { redact } = require('./privacy-scan');
 
 module.exports = function logCommit(hash, message, files) {
   try {
+    // Escape hatch for scripted/test environments, symmetric with the
+    // pre-commit hook's PEBBL_SKIP_SCAN: a harness that makes git commits it
+    // does NOT want captured into memory (e.g. the P0 merge tests, whose
+    // committed events.jsonl would be dirtied right after every commit) sets
+    // this to skip the whole capture.
+    if (process.env.PEBBL_SKIP_CAPTURE) return;
     const pebblDir = findPebblDir();
     if (!pebblDir) return;
 
@@ -36,6 +44,20 @@ module.exports = function logCommit(hash, message, files) {
       INSERT INTO logs (timestamp, source, category, tier, message, topics)
       VALUES (?, 'hook', ?, 'fleeting', ?, NULL)
     `).run(ts, category, msg);
+
+    // The logs row above must ALSO exist in events.jsonl — this was the
+    // fold/db id-drift write bug: log-commit inserted db-only rows, so
+    // db.sqlite's AUTOINCREMENT ids ran ahead of the fold's renumbered ids
+    // and every later row mismapped in compact's eid translation (and the
+    // phantom rows themselves vanished on the next rebuild-from-events).
+    // Same append+rebuild seam log.js uses (appendLogEvent under the store
+    // lock, rebuildEventsView for the folded artifacts); the surrounding
+    // try/catch keeps the never-block-a-commit contract.
+    appendLogEvent(
+      pebblDir,
+      { ts, category, tier: 'fleeting', message: msg, source: 'hook' },
+      (rows) => rebuildEventsView(pebblDir, rows),
+    );
   } catch {
     // Never block a commit
   }

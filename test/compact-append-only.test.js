@@ -24,6 +24,12 @@ const { fold } = require('../src/fold');
 const NODE = process.execPath;
 const HERMETIC_PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
 
+// The first test commits inside the store repo; the post-commit capture hook
+// would append a commit-capture event and skew the 12-append arithmetic, so
+// capture is disabled for this file (children inherit the env). Capture is
+// covered by test/compact-id-drift.test.js.
+process.env.PEBBL_SKIP_CAPTURE = '1';
+
 // Spin up a throwaway git repo with a populated, REAL (categorized, topic'd)
 // pebbl store so buildGroups finds a rollup group. Flags use the names pebbl
 // log actually knows: --cat / --tier / --topic (NOT --category/--topics).
