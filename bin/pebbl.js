@@ -30,6 +30,7 @@ const commands = {
   'privacy-scan': () => require('../src/privacy-scan').cli(args),
   'log-commit': () => require('../src/log-commit')(args[0], args[1], args[2]),
   'migrate-to-events': () => require('../src/migrate-to-events')(args),
+  'repair-rollups': () => require('../src/repair-rollups')(args),
   cutover:      () => require('../src/cutover')(args),
 };
 
