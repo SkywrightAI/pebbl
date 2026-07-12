@@ -409,6 +409,26 @@ Flags:
 
 Without a flag, nothing on disk changes. db.sqlite is NEVER deleted.
 `,
+
+  'repair-rollups': `pebbl repair-rollups — repair a compaction whose rollup membership is wrong
+
+Detects supersede (rollup) events whose recorded rolls_up members do not
+match the entries the rollup's own concatenated text was built from (the
+id-drift mis-roll: a positional int->eid map shifted by phantom db-only
+rows). Then repairs APPEND-ONLY — history is never rewritten:
+
+  - a wrongly-suppressed entry (hidden, content in NO live rollup text) is
+    restored by a fresh append event carrying the original fields plus a
+    restores:<eid> audit field
+  - an escaped duplicate (live, but its content already sits in a newer
+    live rollup's text) is hidden by an expire event
+
+DRY-RUN by default: prints the diagnosis + plan and writes nothing.
+Idempotent: a second run plans nothing.
+
+Flags:
+  --apply        append the repair events and rebuild the read model
+`,
 };
 
 const TOPLEVEL = `pebbl — local project memory
