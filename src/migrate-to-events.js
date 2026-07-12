@@ -465,8 +465,9 @@ function buildEvents(snapshot, maps, actor) {
   }
 
   // commits table -> `commit` events. Separate id space from logs; the fold
-  // does not yet reduce these (KNOWN_TYPES has no `commit`), but they are
-  // emitted losslessly and session_commits remaps to their eids.
+  // reduces these into the commits projection (fold.js `commit` case), so a
+  // rebuild-from-events regenerates the commits table + commit-log.md, and
+  // session_commits remaps to their eids.
   for (const c of commits) {
     events.push({
       eid: commitEid.get(c.hash),

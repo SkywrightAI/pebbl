@@ -63,6 +63,14 @@ const KNOWN_TYPES = new Set([
   // leaves every existing projection untouched. A registry of cadence contracts
   // (`liveness-register`) plus the heartbeats that satisfy them (`heartbeat`).
   'liveness-register', 'heartbeat',
+  // Commit capture. migrate-to-events has minted `commit` events since P2 and
+  // log-commit.js appends one per captured commit; folding them into the
+  // `commits` side channel is what lets a rebuild-from-events REGENERATE the
+  // commits table + commit-log.md instead of wiping them (the incident where
+  // compaction's rebuild destroyed every captured-commit row). Side channel
+  // ONLY — the logs projection is untouched, so a stream without them folds
+  // byte-identically to before.
+  'commit',
 ]);
 
 // ── the reducer ──────────────────────────────────────────────────────────────
@@ -253,6 +261,27 @@ function foldFull(events) {
         }
         break;
       }
+      case 'commit': {
+        // Captured git commit -> a commits-table row. Field names mirror the
+        // db schema (timestamp/hash/message/files); category is the optional
+        // rubric classification log-commit stamps (present-only) so the
+        // regenerated commit-log.md line matches the appended one. `sorted`
+        // order makes the row order (and the ids assigned below)
+        // deterministic. No dedup: two capture events are two rows, exactly
+        // like two INSERTs were.
+        const row = {
+          eid: e.eid,
+          timestamp: e.ts,
+          hash: e.hash || '',
+          message: e.message || '',
+          files: e.files || '',
+        };
+        if (typeof e.category === 'string' && e.category !== '') {
+          row.category = e.category;
+        }
+        commits.push(row);
+        break;
+      }
       case 'narrative-set': {
         // Latest write wins (sorted order makes "latest" deterministic).
         narrative = {
@@ -340,6 +369,15 @@ function foldFull(events) {
     delete h.sessionEntryEids;
     delete h.sessionCommits;
     delete h.__order;
+  }
+
+  // Commits get their own local integer space too (mirrors the separate
+  // commits.id AUTOINCREMENT); rows are already in deterministic
+  // (ts, emitted_at, eid) order from the sorted pass.
+  let nextCid = 1;
+  for (const c of commits) {
+    c.id = nextCid;
+    nextCid += 1;
   }
 
   // narrative refs are foundation log refs -> local ints.

@@ -208,6 +208,26 @@ function makeExpireEvent(pebblDir, { ts, target, actor }) {
   };
 }
 
+// `commit` event maker — the event-backed form of the git post-commit capture
+// (log-commit.js) and of the compact-rebuild backfill for commits rows that
+// predate event-backed capture. The wire shape matches EXACTLY what
+// migrate-to-events.js has minted for commits-table rows since P2
+// (hash/message/files on the standard envelope), so the fold's `commit` case
+// reduces migrated and freshly-captured commits identically. `category` is a
+// PRESENT-ONLY extra (like sourceField): log-commit classifies the commit
+// subject through the rubric for its commit-log.md line, and stamping it on
+// the event keeps a regenerated commit-log.md identical to the appended one;
+// migrated events without it render with the same defaults as before.
+function makeCommitEvent(pebblDir, { ts, hash, message, files, category, actor }) {
+  return {
+    ...makeEnvelope(pebblDir, 'commit', { ts, actor }),
+    hash: hash || '',
+    message: message || '',
+    files: files || '',
+    ...(category ? { category: String(category) } : {}),
+  };
+}
+
 // Liveness event makers (Primitive 2). Both ride the SAME makeEnvelope head as
 // every maker above (eid/ts/emitted_at/actor/v) — additive, never touching an
 // existing type. The fold (src/fold.js) builds a `liveness` projection from
@@ -459,6 +479,7 @@ module.exports = {
   makeSupersedeEvent,
   makeResolveEvent,
   makeExpireEvent,
+  makeCommitEvent,
   makeLivenessRegisterEvent,
   makeHeartbeatEvent,
   repairTrailingNewline,

@@ -4,7 +4,7 @@ const path = require('path');
 const { findPebblDir } = require('./find-pebbl');
 const { openDb } = require('./db');
 const { loadRubric, classifyEntry } = require('./rubric');
-const { appendLogEvent } = require('./events');
+const { appendEventBatch, makeAppendEvent, makeCommitEvent } = require('./events');
 const { rebuildEventsView } = require('./log');
 // Projection-boundary secret mask: commit-log.md is committed + gate-scanned;
 // the DB (commits/logs tables below) keeps the original commit message.
@@ -45,17 +45,23 @@ module.exports = function logCommit(hash, message, files) {
       VALUES (?, 'hook', ?, 'fleeting', ?, NULL)
     `).run(ts, category, msg);
 
-    // The logs row above must ALSO exist in events.jsonl — this was the
-    // fold/db id-drift write bug: log-commit inserted db-only rows, so
-    // db.sqlite's AUTOINCREMENT ids ran ahead of the fold's renumbered ids
-    // and every later row mismapped in compact's eid translation (and the
-    // phantom rows themselves vanished on the next rebuild-from-events).
-    // Same append+rebuild seam log.js uses (appendLogEvent under the store
-    // lock, rebuildEventsView for the folded artifacts); the surrounding
+    // BOTH rows above must ALSO exist in events.jsonl — this was the fold/db
+    // id-drift write bug: log-commit inserted db-only rows, so db.sqlite's
+    // AUTOINCREMENT ids ran ahead of the fold's renumbered ids and every
+    // later row mismapped in compact's eid translation (and the phantom rows
+    // themselves vanished on the next rebuild-from-events). The `commit`
+    // event is the commits-table half of the same bug: without it, a
+    // rebuild-from-events (compact.js rebuildReadModelFromEvents) folds an
+    // EMPTY commits projection and wipes every captured commit — the loom
+    // incident. One batch under one store lock, one view rebuild
+    // (rebuildEventsView, the same seam log.js uses); the surrounding
     // try/catch keeps the never-block-a-commit contract.
-    appendLogEvent(
+    appendEventBatch(
       pebblDir,
-      { ts, category, tier: 'fleeting', message: msg, source: 'hook' },
+      [
+        makeCommitEvent(pebblDir, { ts, hash, message: msg, files: fileList, category }),
+        makeAppendEvent(pebblDir, { ts, category, tier: 'fleeting', message: msg, source: 'hook' }),
+      ],
       (rows) => rebuildEventsView(pebblDir, rows),
     );
   } catch {
