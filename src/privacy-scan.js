@@ -85,8 +85,13 @@ function findPublicIps(text) {
 const CRED_PATH_PATTERNS = [
   // dot-env style basenames: .env, .env.local, .claude-env, .factory-env, etc.
   /(^|[\s"'`(=:/\\])\.(?:[a-z0-9-]+-)?env(?:\.[a-z0-9.-]+)?\b/i,
-  // any *-bot.env or *.env file under a path (e.g. /etc/factory-updates-bot.env)
-  /[\w./-]*\b[\w-]*\.env\b/i,
+  // any *-bot.env or *.env file under a path (e.g. /etc/factory-updates-bot.env).
+  // Requires a slash OR a hyphen somewhere in the matched token so that
+  // JS property accesses like `process.env` and `import.meta.env` are not
+  // flagged — those contain only word chars and dots, never a path separator
+  // or hyphen. Real dotfile paths (/app/.env, config/.env) and hyphenated
+  // filenames (factory-updates-bot.env) still fire.
+  /(?:[\w/-]*-[\w/-]*|[\w.]*\/[\w./-]*)\.env\b/i,
   // explicit /etc|/root credential dirs naming env/secret/token/credential files
   /\/(?:etc|root|home\/[^/\s]+)\/[\w./-]*(?:bot\.env|\.env|\.claude-env|secret|credential|token)[\w./-]*/i,
 ];
@@ -139,11 +144,28 @@ const TOKEN_PATTERNS = [
   { name: 'assignment-bare', re: new RegExp(`(?:${ASSIGNMENT_KEYWORDS})\\s*[:=]\\s*([A-Za-z0-9+/_=-]{20,})`, 'i'), valueGroup: 1 },
 ];
 
+// W3C DTCG design-token paths (e.g. "color.primary", "typography.size.sm"):
+// only lowercase letters, digits, and dots. Real secrets never look like this
+// (they're hex, base64, UUIDs, bearer strings). Skip assignment-quoted/bare hits
+// whose captured VALUE is purely a dot-notation identifier so that
+//   { "token": "color.primary" }
+// in design-system schema files doesn't trip the scanner. Structural exemption
+// only — the dot-notation shape is too narrow to be a real secret.
+const DTCG_TOKEN_PATH_RE = /^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/;
+
 function findTokens(text) {
   const out = [];
   for (const { name, re, valueGroup } of TOKEN_PATTERNS) {
     const m = re.exec(text);
     if (!m) continue;
+    // Skip assignment-shape hits whose captured value is a W3C DTCG token path
+    // (dot-notation identifier like "color.primary" or "typography.size.sm").
+    // Real credentials are hex, base64, UUIDs, or bearer strings — never
+    // all-lowercase dot-separated identifiers.
+    if (valueGroup != null && m[valueGroup] != null &&
+        DTCG_TOKEN_PATH_RE.test(m[valueGroup].trim())) {
+      continue;
+    }
     const hit = { shape: name, match: m[0], index: m.index };
     // For the assignment shapes, record the absolute span of just the VALUE
     // (the captured group) so redact() can mask the secret while keeping the
