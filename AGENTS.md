@@ -3,26 +3,22 @@
 Node.js CLI for local project memory. Stores decisions, handoffs, and commit
 context in SQLite under `.pebbl/`. Entry point: `bin/pebbl.js`.
 
-## Factory routing
+## Factory routing (loom)
 
-Factory pipeline agents (droplet or Mac deployment): skip this section —
-you are the factory.
+Building or fixing something? Route it through loom (the factory at `~/loom`).
+The old sw-factory / droplet/repos.conf system is archived.
 
-Interactive sessions: feature and fix work goes through the factory
-pipeline (queue → build → adversarial review → staging), never ad-hoc
-subagents that bypass review. Vague idea or new feature? `/factory-scope`
-first — goal interview, decision gate, then it queues the task itself.
-Already scoped: write a task prompt (contract in
-`~/factory/repos/sw-factory/FACTORY.md`), then
-`factory-queue pebbl <task-name> <prompt-file>`; the runner picks it up
-within 15 min and Telegram reports each stage. Don't also build it
-in-session. Two deployments run the same scripts: the Mac (`~/factory`,
-the default queue target) and the droplet (`--droplet`, the always-on
-overnight runner).
-Fallback only when no deployment is reachable: one task, one
-`agent/<task>-local` branch off origin/staging, routed through review
-later via `pipeline.sh pebbl <task> <prompt> <branch>`. Small in-session
-edits with Ashley are fine; unreviewed builder subagents are not.
+- **Queue a task:** `loom add "<goal>" --area <paths>` (or `loom scope <idea>` + `loom scope --approve <id>` for a gated spec).
+- **Build it:** `loom next` claims the next task; `loom claim <id>` to hand-target one. Run the build in a fresh-context subagent.
+- **Land it:** `loom review <id> <dir> <test-cmd>` → `loom promote <branch> main --repo <path> --task <id>`, or `loom landed <id> --evidence <sha>` for an external merge.
+
+Interactive session editing this repo directly? Take a lane first:
+
+```bash
+cd ~/loom && loom lease acquire --area '<repo-relative globs>'
+# … edit, commit …
+loom lease release
+```
 
 ## Commands
 
@@ -119,3 +115,25 @@ Ask first: install/remove packages, git commit/push, edit `package.json` or
 - User-facing usage: [README.md](README.md)
 - Flag and category reference: [PEBBL.md](PEBBL.md)
 - Eval setup: [EVAL_HARNESS.md](EVAL_HARNESS.md)
+
+<!-- pebbl:begin -->
+## Pebbl — Memory
+
+Local CLI for project memory. Flag details: `pebbl <cmd> --help`. Concepts: `pebbl help <topic>` (categories, tiers, compaction, file-layout, entry-ids).
+
+**Every session, before code:** `pebbl context` (read open handoff + recent decisions). An open handoff's `done` field is what the *previous* agent finished — don't claim it as your own. The `todo` field is what's left for you. Close the handoff with `pebbl handoff --close` when you complete the remaining work.
+
+**Before any non-trivial decision:** `pebbl search "<area>"` — don't re-litigate prior choices.
+
+**Log the moment a decision or failed approach lands.** Always include `--cat` and `--topic`. Always explain *why*, not just *what* — entries without rationale get auto-demoted.
+
+```bash
+pebbl log "chose bcrypt over argon2 because team already operates bcrypt in prod" --cat decision --topic auth
+```
+
+**End of session:** `pebbl handoff "<summary>" --done "a; b" --todo "c; d" --topic <area>`. Use `;` to split atomic items — one run-on becomes one unsearchable blob.
+
+**A detail-heavy handoff needs a rendered doc.** When the end-of-session detail is large, write it to a readable file (e.g. `docs/handoffs/<topic>.md`) and link it with `--docs <path>` — the fields are for searchable one-liners, the doc is the readable detail. pebbl REFUSES a detail-heavy handoff that links neither `--docs` nor `--no-doc`, so the rendered doc reliably gets made instead of the detail being crammed into the fields or written somewhere and never linked. The linked doc resurfaces on `pebbl context`.
+
+**Don't log:** routine code changes (the git hook captures commits), or anything obvious from reading the code.
+<!-- pebbl:end -->
