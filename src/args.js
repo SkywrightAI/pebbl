@@ -3,7 +3,7 @@
 const KNOWN_FLAGS = new Set([
   'cat', 'topic', 'source', 'tier', 'scope',
   'relates', 'corrects', 'preview', 'execute', 'resolve',
-  'done', 'todo', 'blocked', 'docs', 'latest', 'list', 'close',
+  'done', 'todo', 'blocked', 'docs', 'no-doc', 'latest', 'list', 'close',
   'open', 'list-open',
   'show', 'generate', 'include-archive', 'deep', 'n', 'refresh',
   'as-of', 'history', 'share', 'importance',
@@ -12,7 +12,7 @@ const KNOWN_FLAGS = new Set([
   'metrics', // doctor: short-circuit to the quantitative atomicity scoreboard
 ]);
 
-const BOOLEAN_FLAGS = new Set(['preview', 'execute', 'latest', 'list', 'close', 'open', 'list-open', 'show', 'generate', 'include-archive', 'deep', 'refresh', 'share', 'json', 'all', 'strict', 'metrics']);
+const BOOLEAN_FLAGS = new Set(['preview', 'execute', 'latest', 'list', 'close', 'open', 'list-open', 'show', 'generate', 'include-archive', 'deep', 'refresh', 'share', 'json', 'all', 'strict', 'metrics', 'no-doc']);
 
 // Flags that may legitimately be given more than once. A repeat ACCUMULATES
 // into an array instead of overwriting — the old behavior silently kept only the

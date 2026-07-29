@@ -314,6 +314,10 @@ Flags:
   --done <items>       semicolon-separated completed items
   --todo <items>       semicolon-separated remaining items
   --blocked <items>    semicolon-separated blockers
+  --docs <paths>       comma-separated paths to rendered handoff doc(s) — the
+                       readable detail the next agent opens; resurfaced on
+                       --latest and \`pebbl context\`
+  --no-doc             opt out of the detail-doc requirement for one heavy handoff
   --topic <topic>      free-form topic
   --source <source>    human|agent (default: agent)
   --latest             show the most recent handoff
@@ -326,6 +330,10 @@ Flags:
 
 Handoffs materialize one block per --done/--todo/--blocked item into
 handoffs.md so each item is independently searchable.
+
+A DETAIL-HEAVY handoff (a lot of done/todo/blocked text) must link a rendered
+doc with --docs — a readable document beats detail crammed into the fields, and
+a linked doc can't be orphaned. Pass --no-doc to record a terse handoff anyway.
 `,
 
   narrative: `pebbl narrative — view or set the project narrative

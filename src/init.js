@@ -31,6 +31,8 @@ pebbl log "chose bcrypt over argon2 because team already operates bcrypt in prod
 
 **End of session:** \`pebbl handoff "<summary>" --done "a; b" --todo "c; d" --topic <area>\`. Use \`;\` to split atomic items — one run-on becomes one unsearchable blob.
 
+**A detail-heavy handoff needs a rendered doc.** When the end-of-session detail is large, write it to a readable file (e.g. \`docs/handoffs/<topic>.md\`) and link it with \`--docs <path>\` — the fields are for searchable one-liners, the doc is the readable detail. pebbl REFUSES a detail-heavy handoff that links neither \`--docs\` nor \`--no-doc\`, so the rendered doc reliably gets made instead of the detail being crammed into the fields or written somewhere and never linked. The linked doc resurfaces on \`pebbl context\`.
+
 **Don't log:** routine code changes (the git hook captures commits), or anything obvious from reading the code.
 ${AGENT_END}
 `;

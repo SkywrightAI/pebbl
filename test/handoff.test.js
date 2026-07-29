@@ -66,6 +66,63 @@ function setupDb(dir) {
   return db;
 }
 
+describe('handoff - detail-doc guard', () => {
+  const dirs = [];
+  after(() => {
+    for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
+  });
+  function project() {
+    const d = initProject();
+    dirs.push(d);
+    return d;
+  }
+  function handoffCount(dir) {
+    const db = new Database(path.join(dir, '.pebbl', 'db.sqlite'));
+    const n = db.prepare('SELECT COUNT(*) c FROM handoffs').get().c;
+    db.close();
+    return n;
+  }
+  // > DETAIL_DOC_THRESHOLD (1200 chars of done+todo+blocked)
+  const heavy = 'this session did a lot; '.repeat(60);
+
+  it('REFUSES a detail-heavy handoff with neither --docs nor --no-doc, store untouched', () => {
+    const d = project();
+    const r = runHandoff(d, ['heavy session', '--done', heavy]);
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /no rendered doc/i);
+    assert.equal(handoffCount(d), 0, 'refused BEFORE the insert — no row written');
+  });
+
+  it('PASSES when a rendered doc is linked with --docs', () => {
+    const d = project();
+    const r = runHandoff(d, ['heavy session', '--done', heavy, '--docs', 'docs/handoffs/x.md']);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /Handoff #\d+ created/);
+    assert.equal(handoffCount(d), 1);
+  });
+
+  it('PASSES with the explicit --no-doc opt-out (no truncation forced)', () => {
+    const d = project();
+    const r = runHandoff(d, ['heavy session', '--done', heavy, '--no-doc']);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.equal(handoffCount(d), 1);
+  });
+
+  it('does NOT fire on a normal, light handoff', () => {
+    const d = project();
+    const r = runHandoff(d, ['light session', '--done', 'shipped X; fixed Y', '--todo', 'wire Z']);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.equal(handoffCount(d), 1);
+  });
+
+  it('resurfaces the linked doc on `pebbl context`', () => {
+    const d = project();
+    runHandoff(d, ['heavy session', '--done', heavy, '--docs', 'docs/handoffs/x.md']);
+    const ctx = spawnSync(BIN, ['context'], { cwd: d, encoding: 'utf8' });
+    assert.match(ctx.stdout, /docs\/handoffs\/x\.md/, 'the doc path is shown on pickup');
+  });
+});
+
 describe('handoff - create', () => {
   let dir, db;
 

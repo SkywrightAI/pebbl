@@ -14,6 +14,14 @@ const { redact } = require('./privacy-scan');
 // (db.sqlite + events.jsonl), which redact() never protected.
 const { guardWrite } = require('./secret-guard');
 
+// DETAIL-DOC THRESHOLD: past this many chars of done+todo+blocked, a handoff is
+// "detail-heavy" and must link a rendered doc (--docs) or opt out (--no-doc). The
+// number is the combined field length at which cramming beats a readable document —
+// tuned from real stores (routine handoffs run a few hundred chars; the ones that
+// SHOULD have been a doc ran 2-3.5k). Deliberately generous so it only bites the
+// genuinely heavy ones, never a normal end-of-session note.
+const DETAIL_DOC_THRESHOLD = 1200;
+
 module.exports = function handoff(args) {
   const { flags, positional } = parseArgs(args);
 
@@ -201,6 +209,33 @@ module.exports = function handoff(args) {
   const docs = flags.docs
     ? JSON.stringify(flags.docs.split(',').map(s => s.trim()).filter(Boolean))
     : null;
+
+  // ── DETAIL-DOC GUARD ─────────────────────────────────────────────────────────
+  // The failure this fixes: when a handoff needs a lot of detail, the rich context
+  // either bloats the searchable fields into an unsearchable wall, OR gets written
+  // to a doc the handoff never links (orphaned — the next agent can't find it). So
+  // whether the "rendered document" gets produced was left to the agent's judgment,
+  // and it happened only a fraction of the time. Force the choice at WRITE time —
+  // the same fail-BEFORE-insert shape as malformedSummary/guardWrite above: past the
+  // detail threshold a handoff must EITHER attach a rendered doc (--docs) OR opt out
+  // explicitly (--no-doc). That makes "produce the doc" the reliable default instead
+  // of a step taken some of the time; --no-doc is the escape hatch so a legitimately
+  // long-but-terse handoff is never forced to TRUNCATE its own content to get under
+  // the bar (the failure mode a hard, hatch-less block would create).
+  const detailChars = (done || '').length + (todo || '').length + (blocked || '').length;
+  if (detailChars > DETAIL_DOC_THRESHOLD && !docs && !flags['no-doc']) {
+    console.error(
+      `pebbl: this handoff carries ${detailChars} chars of detail across done/todo/blocked ` +
+      `but links no rendered doc.\n` +
+      `Detail-heavy context belongs in a readable document the next agent can open — not ` +
+      `crammed into the searchable fields. Either:\n` +
+      `  • write the detail to a file and link it:   --docs docs/handoffs/<topic>.md\n` +
+      `  • or record a terse handoff anyway:          --no-doc\n` +
+      `(threshold ${DETAIL_DOC_THRESHOLD} chars. A linked doc travels with the repo and ` +
+      `resurfaces on \`pebbl context\` / \`pebbl handoff --latest\`.)`
+    );
+    process.exit(1);
+  }
 
   // Auto-collect: find all log entries since the last handoff (or last 2 hours)
   const lastHandoff = db.prepare(

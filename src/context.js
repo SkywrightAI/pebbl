@@ -134,6 +134,14 @@ function showOpenHandoff(db, pebblDir) {
   if (newest.todo)    console.log(`  remaining for you:        ${newest.todo}`);
   if (newest.blocked) console.log(`  blocked:                  ${newest.blocked}`);
   if (newest.topics)  console.log(`  topics:                   ${newest.topics}`);
+  // Resurface the rendered handoff doc(s) so the readable detail is never orphaned —
+  // the whole point of linking one is that the NEXT agent finds it on pickup.
+  if (newest.docs) {
+    const docList = JSON.parse(newest.docs || '[]');
+    if (docList.length) {
+      console.log(`  📄 full detail:           ${docList.join(', ')} — read this first`);
+    }
+  }
   if (hoursAgo(newest.timestamp) >= staleHours) {
     console.log(`  ⚠ stale: open ${hoursAgo(newest.timestamp)}h (≥ ${staleHours}h threshold)`);
   }
