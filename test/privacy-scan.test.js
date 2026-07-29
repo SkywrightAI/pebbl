@@ -152,6 +152,75 @@ describe('privacy-scan — adversarial combined + clean', () => {
   });
 });
 
+describe('privacy-scan — false-positive fixes (DTCG tokens + process.env)', () => {
+  // ── DTCG design-token paths: MUST NOT fire ────────────────────────────────
+  it('does NOT flag a DTCG dot-notation token path in a JSON schema', () => {
+    assert.equal(scan('{ "token": "color.primary" }').filter((h) => h.class === 'token').length, 0);
+  });
+
+  it('does NOT flag a multi-level DTCG token path', () => {
+    assert.equal(scan('token: "typography.size.sm"').filter((h) => h.class === 'token').length, 0);
+  });
+
+  // ── process.env / import.meta.env: MUST NOT fire ──────────────────────────
+  it('does NOT flag process.env (JS property access)', () => {
+    assert.equal(scan('const { env } = process').filter((h) => h.class === 'cred-path').length, 0);
+    assert.equal(scan('process.env').filter((h) => h.class === 'cred-path').length, 0);
+    assert.equal(scan('process.env.MODE').filter((h) => h.class === 'cred-path').length, 0);
+  });
+
+  it('does NOT flag import.meta.env.MODE (JS property chain)', () => {
+    assert.equal(scan('import.meta.env.MODE').filter((h) => h.class === 'cred-path').length, 0);
+  });
+
+  // ── Real .env credential paths: MUST STILL fire ───────────────────────────
+  it('STILL flags a bare .env file reference', () => {
+    assert.ok(scan('cp .env /backup/').some((h) => h.class === 'cred-path'));
+  });
+
+  it('STILL flags source ./.env', () => {
+    assert.ok(scan('source ./.env').some((h) => h.class === 'cred-path'));
+  });
+
+  it('STILL flags /app/.env in a path string', () => {
+    assert.ok(scan('/app/.env').some((h) => h.class === 'cred-path'));
+  });
+
+  it('STILL flags config/.env (relative path with slash)', () => {
+    assert.ok(scan('config/.env').some((h) => h.class === 'cred-path'));
+  });
+
+  // ── Real secret tokens: MUST STILL fire ───────────────────────────────────
+  it('STILL flags an Anthropic API key assignment', () => {
+    assert.ok(scan('token = "sk-ant-api03-xxxxxxxxxxxxxxxxxxxx"').some((h) => h.class === 'token'));
+  });
+
+  it('STILL flags a github token assignment', () => {
+    assert.ok(scan('token: "ghp_16CharsOrMoreOfBase64Junk"').some((h) => h.class === 'token'));
+  });
+
+  it('STILL flags an AWS access key assignment', () => {
+    assert.ok(scan('api_key: "AKIA1234567890ABCDEF"').some((h) => h.class === 'token'));
+  });
+
+  it('STILL flags a long hex secret in a token assignment', () => {
+    assert.ok(scan('token: "deadbeefdeadbeefdeadbeef1234"').some((h) => h.class === 'token'));
+  });
+
+  it('STILL flags a weak password in an assignment', () => {
+    // hunter2hunter2hunter2 >= 20 chars, bare assignment shape
+    assert.ok(scan('password = "hunter2hunter2hunter2"').some((h) => h.class === 'token'));
+  });
+
+  it('STILL flags a real .env path like `cp .env /backup/`', () => {
+    assert.ok(scan('cp .env /backup/').some((h) => h.class === 'cred-path'));
+  });
+
+  it('STILL flags `source ./.env`', () => {
+    assert.ok(scan('source ./.env').some((h) => h.class === 'cred-path'));
+  });
+});
+
 describe('privacy-scan — remote visibility detection', () => {
   const noEnv = (fn) => {
     const saved = { v: process.env.PEBBL_REMOTE_VISIBILITY, g: process.env.PEBBL_GH_VISIBILITY };
