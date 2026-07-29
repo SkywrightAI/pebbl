@@ -306,4 +306,127 @@ describe('ensureProjectFiles', () => {
     assert(content.includes('custom'), 'custom rules preserved');
     assert(content.includes('^trace:'), 'trace rule migrated in');
   });
+
+  // v0.7: rubrics predating the steering rule never gained it — the v0.5/v0.6
+  // steps only edit a rule that is already there.
+  it('inserts the steering rule when the rubric has none', () => {
+    dir = tmpDir();
+    const preSteering = [
+      '# header comment',
+      '',
+      'rules:',
+      '  - pattern: "^\\[session\\]"',
+      '    category: uncategorized',
+      '    tier: fleeting',
+      '',
+      '  - pattern: "^trace:"',
+      '    category: quality',
+      '    tier: detail',
+      '',
+    ].join('\n');
+    fs.writeFileSync(path.join(dir, 'rubric.yml'), preSteering);
+    ensureProjectFiles(dir);
+    const content = fs.readFileSync(path.join(dir, 'rubric.yml'), 'utf8');
+    assert(/category:\s*steering/.test(content), 'steering rule inserted');
+    assert(content.includes('parked|friction|'), 'steering pattern catches friction');
+    assert(content.indexOf('^trace:') < content.indexOf('category: steering'),
+      'steering lands below the trace rule, matching DEFAULT_RUBRIC order');
+    assert(content.search(/\[session/) < content.indexOf('category: steering'),
+      'the [session] rule keeps first-match priority over the inserted rule');
+
+    // The rule must actually classify, not just be present as text.
+    const { loadRubric, classifyEntry } = require('../src/rubric');
+    const hit = classifyEntry(loadRubric(dir), 'regression in the exporter after the refactor');
+    assert.strictEqual(hit.category, 'steering');
+  });
+
+  it('is idempotent: a rubric that already has steering is untouched', () => {
+    dir = tmpDir();
+    ensureProjectFiles(dir); // writes DEFAULT_RUBRIC, which has steering
+    const first = fs.readFileSync(path.join(dir, 'rubric.yml'), 'utf8');
+    ensureProjectFiles(dir);
+    const second = fs.readFileSync(path.join(dir, 'rubric.yml'), 'utf8');
+    assert.strictEqual(second, first, 're-running migrations is a no-op');
+    assert.strictEqual((second.match(/category: steering/g) || []).length, 1,
+      'steering rule not duplicated');
+  });
+
+  // v0.8: the old v0.4 anchor wrote the trace rule above `rules:` whenever the
+  // session pattern was escaped. pebbl's lenient parser read it anyway, so the
+  // damage was invalid YAML rather than a broken rubric.
+  it('moves rules stranded above the rules: key back underneath it', () => {
+    dir = tmpDir();
+    const malformed = [
+      '# header comment',
+      '',
+      '  - pattern: "^trace:"',
+      '    category: quality',
+      '    tier: detail',
+      '',
+      'rules:',
+      '  - pattern: "custom"',
+      '    category: quality',
+      '    tier: component',
+      '',
+    ].join('\n');
+    fs.writeFileSync(path.join(dir, 'rubric.yml'), malformed);
+    ensureProjectFiles(dir);
+    const content = fs.readFileSync(path.join(dir, 'rubric.yml'), 'utf8');
+    const rulesIdx = content.search(/^rules:/m);
+    const firstRuleIdx = content.search(/^[ \t]+- pattern:/m);
+    assert(rulesIdx !== -1, 'rules: key kept');
+    assert(rulesIdx < firstRuleIdx, 'every rule now sits below rules:');
+    assert(content.includes('^trace:'), 'stray rule preserved, not dropped');
+    assert(content.includes('custom'), 'pre-existing rule preserved');
+    assert.strictEqual((content.match(/\^trace:/g) || []).length, 1, 'stray rule not duplicated');
+
+    const { loadRubric, classifyEntry } = require('../src/rubric');
+    const rules = loadRubric(dir);
+    assert.strictEqual(classifyEntry(rules, 'trace: shipped the thing').category, 'quality');
+    assert.strictEqual(classifyEntry(rules, 'custom').category, 'quality');
+  });
+
+  // Regression: repairing a real-world rubric (custom lead rule + escaped
+  // session pattern + a stray rule above `rules:`) must not demote the
+  // [session] rule below the unanchored keyword rules it has to outrank.
+  it('keeps the [session] rule first-match when repairing a customised rubric', () => {
+    dir = tmpDir();
+    const lumrShaped = [
+      '# Pebbl classification rubric',
+      '',
+      '  - pattern: "^trace:"',
+      '    category: quality',
+      '    tier: detail',
+      '',
+      'rules:',
+      '  - pattern: "youtube transcript|video transcript|transcript:"',
+      '    category: transcript',
+      '    tier: reference',
+      '    notes_dir: transcripts/',
+      '',
+      '  - pattern: "^\\[session\\]"',
+      '    category: uncategorized',
+      '    tier: fleeting',
+      '',
+      '  - pattern: "chose|decided|decision|picked|went with|trade-?off|constraint|switched|replaced|changed to|adopted|rejected|dropped|reverted|migrated"',
+      '    category: decision',
+      '    tier: component',
+      '',
+    ].join('\n');
+    fs.writeFileSync(path.join(dir, 'rubric.yml'), lumrShaped);
+    ensureProjectFiles(dir);
+    const content = fs.readFileSync(path.join(dir, 'rubric.yml'), 'utf8');
+    assert(content.search(/^rules:/m) < content.search(/^[ \t]+- pattern:/m), 'valid shape');
+    assert(content.search(/\[session/) < content.indexOf('category: steering'),
+      '[session] still outranks the inserted steering rule');
+    assert(content.indexOf('transcript:') < content.search(/\[session/),
+      'the custom lead rule keeps its position');
+
+    const { loadRubric, classifyEntry } = require('../src/rubric');
+    const rules = loadRubric(dir);
+    // The payoff: a session dump that merely mentions a regression stays
+    // fleeting instead of being filed as steering.
+    assert.strictEqual(classifyEntry(rules, '[session] notes: hit a regression mid-run').tier, 'fleeting');
+    assert.strictEqual(classifyEntry(rules, 'regression in the exporter').category, 'steering');
+  });
 });

@@ -281,6 +281,69 @@ sources:
   dirs: sources
 `;
 
+// Byte offset just past the end of the top-level `rules:` line, or -1 if the
+// rubric has no such line. Every rule insertion anchors off this so a new rule
+// can never land ABOVE `rules:` (see moveStrayRulesUnderRulesKey).
+function endOfRulesKey(content) {
+  const m = /^rules:[ \t]*$/m.exec(content);
+  if (!m) return -1;
+  return m.index + m[0].length;
+}
+
+// Insert a rule block into an existing rubric, below `rules:`.
+//
+// Anchor preference, highest first:
+//   1. after the `[session]` rule — it must stay FIRST-match, because it tiers
+//      whole session dumps as fleeting and the rules below it are unanchored
+//      keyword patterns that would otherwise claim a session dump mentioning
+//      e.g. "regression".
+//   2. after the first rule below `rules:` — keeps a hand-written lead rule lead.
+//   3. immediately after `rules:` — rubric has no rules yet.
+// Returns the content unchanged if there is no `rules:` line (a rubric that
+// malformed is the operator's to fix, not ours to guess at).
+function insertRule(content, ruleBlock) {
+  const rulesEnd = endOfRulesKey(content);
+  if (rulesEnd === -1) return content;
+  // Matches the pattern whether or not the brackets are backslash-escaped.
+  const session = /^[ \t]+- pattern:.*\\?\[session\\?\].*$/m.exec(content);
+  const anchorFrom = session && session.index > rulesEnd
+    ? session.index + session[0].length
+    : rulesEnd + 1;
+  const blockEnd = content.indexOf('\n\n', anchorFrom);
+  const insertAt = blockEnd !== -1 ? blockEnd : rulesEnd;
+  return content.slice(0, insertAt) + ruleBlock + content.slice(insertAt);
+}
+
+// v0.8 repair: earlier versions of the v0.4 `^trace:` step anchored on the
+// literal text "[session]", which does not appear in a rubric whose pattern is
+// escaped ("^\[session\]"). indexOf returned -1, the insertion point collapsed
+// to the first blank line in the file, and the rule was written ABOVE the
+// `rules:` key. pebbl's own lenient parser still reads such a rule, so nothing
+// broke visibly — but the file is no longer valid YAML, so any real YAML parser
+// would reject it. Move stray rules back under `rules:` in file order.
+function moveStrayRulesUnderRulesKey(content) {
+  const rulesEnd = endOfRulesKey(content);
+  if (rulesEnd === -1) return { content, moved: 0 };
+  const rulesLineStart = content.lastIndexOf('\n', rulesEnd - 'rules:'.length) + 1;
+  const head = content.slice(0, rulesLineStart);
+  const tail = content.slice(rulesLineStart);
+
+  // A stray block starts at an indented "- pattern:" line and runs to the next
+  // blank line (or end of head).
+  const strayBlock = /^[ \t]+- pattern:.*(?:\n(?![ \t]*$)[ \t]+.*)*\n?/gm;
+  const stray = head.match(strayBlock);
+  if (!stray) return { content, moved: 0 };
+
+  let cleanedHead = head.replace(strayBlock, '');
+  // Collapse the run of blank lines the removal leaves behind.
+  cleanedHead = cleanedHead.replace(/\n{3,}/g, '\n\n');
+  let rebuilt = cleanedHead + tail;
+  for (const block of stray.reverse()) {
+    rebuilt = insertRule(rebuilt, '\n\n' + block.replace(/\n+$/, ''));
+  }
+  return { content: rebuilt, moved: stray.length };
+}
+
 function migrateRubric(pebblDir) {
   const rubricPath = path.join(pebblDir, 'rubric.yml');
   if (!fs.existsSync(rubricPath)) return;
@@ -319,15 +382,18 @@ function migrateRubric(pebblDir) {
     console.error('pebbl: migrated rubric.yml (signal → component tier)');
   }
 
-  // v0.4: add ^trace: rule for auto-classification of success traces
+  // v0.4: add ^trace: rule for auto-classification of success traces.
+  // Anchored via insertRule so the rule always lands under `rules:` — the old
+  // "[session]"-literal anchor missed escaped patterns and wrote above the key.
   let traceMigrated = false;
   if (!content.includes('^trace:')) {
-    const sessionRuleEnd = content.indexOf('\n\n', content.indexOf('[session]'));
-    const insertAt = sessionRuleEnd !== -1 ? sessionRuleEnd : content.indexOf('rules:') + 'rules:'.length;
     const traceRule = '\n\n  - pattern: "^trace:"\n    category: quality\n    tier: detail';
-    content = content.slice(0, insertAt) + traceRule + content.slice(insertAt);
-    traceMigrated = true;
-    console.error('pebbl: migrated rubric.yml (added ^trace: rule)');
+    const next = insertRule(content, traceRule);
+    if (next !== content) {
+      content = next;
+      traceMigrated = true;
+      console.error('pebbl: migrated rubric.yml (added ^trace: rule)');
+    }
   }
 
   // v0.5: add "friction" to the steering rule (named "correction" before v0.6)
@@ -353,13 +419,48 @@ function migrateRubric(pebblDir) {
     console.error('pebbl: migrated rubric.yml (renamed category correction -> steering)');
   }
 
+  // v0.7: insert the steering rule when it is ABSENT.
+  // The v0.5/v0.6 steps above only edit a steering rule that already exists, so
+  // rubrics written before the rule shipped never gained it — friction,
+  // regressions and parked work in those stores fell through to whatever rule
+  // matched next (usually none) and had to be hand-tagged with --cat forever.
+  let steeringAdded = false;
+  if (!/category:\s*steering\b/.test(content)) {
+    const steeringRule = '\n\n  - pattern: "parked|friction|fail(ed)? (review|verdict|adversarial)|verdict: fail|regression|hotfix|incident|crashed|post-?mortem"\n    category: steering\n    tier: detail';
+    // Anchor below ^trace: when present so rule order matches DEFAULT_RUBRIC.
+    const traceIdx = content.indexOf('^trace:');
+    let next;
+    if (traceIdx !== -1) {
+      const traceEnd = content.indexOf('\n\n', traceIdx);
+      next = traceEnd !== -1
+        ? content.slice(0, traceEnd) + steeringRule + content.slice(traceEnd)
+        : content.replace(/\n*$/, steeringRule + '\n');
+    } else {
+      next = insertRule(content, steeringRule);
+    }
+    if (next !== content) {
+      content = next;
+      steeringAdded = true;
+      console.error('pebbl: migrated rubric.yml (added missing steering rule)');
+    }
+  }
+
+  // v0.8: repair rules stranded above the `rules:` key by the old v0.4 anchor.
+  const { content: repaired, moved } = moveStrayRulesUnderRulesKey(content);
+  let strayMoved = false;
+  if (moved > 0) {
+    content = repaired;
+    strayMoved = true;
+    console.error(`pebbl: migrated rubric.yml (moved ${moved} stray rule(s) under rules:)`);
+  }
+
   if (sessionMigrated) {
     console.error('pebbl: migrated rubric.yml (anchored [session] pattern)');
   }
   if (decisionMigrated) {
     console.error('pebbl: migrated rubric.yml (expanded decision keywords)');
   }
-  if (sessionMigrated || decisionMigrated || signalMigrated || traceMigrated || frictionMigrated || correctionRenamed) {
+  if (sessionMigrated || decisionMigrated || signalMigrated || traceMigrated || frictionMigrated || correctionRenamed || steeringAdded || strayMoved) {
     fs.writeFileSync(rubricPath, content);
   }
 }
