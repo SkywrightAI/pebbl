@@ -7,6 +7,11 @@ const KNOWN_FLAGS = new Set([
   'open', 'list-open',
   'show', 'generate', 'include-archive', 'deep', 'n', 'refresh',
   'as-of', 'history', 'share', 'importance',
+  // R4: log --key <identity> (a repeat assert counts instead of duplicating)
+  // and log --outcome failed|worked (failure memory). Both are value flags;
+  // registering them here is what stops parseArgs from demoting them to
+  // positional text and silently gluing "--key sig-x" onto the message.
+  'key', 'outcome',
   'json', 'all', // doctor: machine-readable output; widen past conservative caps
   'strict', // log: FAIL (exit 1, store nothing) on a non-atomic multi-fact entry
   'metrics', // doctor: short-circuit to the quantitative atomicity scoreboard

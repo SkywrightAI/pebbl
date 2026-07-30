@@ -56,6 +56,10 @@ function topicsToString(topics) {
 // "unknown types are ignored, not thrown").
 const KNOWN_TYPES = new Set([
   'append', 'correct', 'supersede', 'resolve', 'expire',
+  // R4: a repeat assert of an existing identity key. Reduces into the LIVE
+  // keyed row's occurrences count and emits no row of its own, so a stream
+  // without any reassert folds byte-identically to before.
+  'reassert',
   'handoff-open', 'handoff-close', 'narrative-set',
   // Primitive 2 (liveness). ADDITIVE: these reduce into the `liveness` side
   // channel ONLY, never into the logs/handoffs/commits/narrative outputs — so a
@@ -178,6 +182,20 @@ function foldFull(events) {
     if (Array.isArray(e.changed_files) && e.changed_files.length > 0) {
       row.changed_files = e.changed_files.slice();
     }
+    // Optional R4 assert tail. Same present-only rule as the lesson tail above,
+    // and the same reason: a pre-v0.8 event must fold to a row WITHOUT these
+    // keys, or every historical row's JSON changes shape and the additive-fold
+    // guarantee breaks. `occurrences` defaults in only when a key is present —
+    // a keyless row has no count to carry.
+    if (typeof e.assert_key === 'string' && e.assert_key !== '') {
+      row.assert_key = e.assert_key;
+      row.occurrences = Number.isInteger(e.occurrences) && e.occurrences > 0
+        ? e.occurrences
+        : 1;
+    }
+    if (e.outcome === 'failed' || e.outcome === 'worked') {
+      row.outcome = e.outcome;
+    }
     rows.push(row);
     rowByEid.set(e.eid, row);
     return row;
@@ -192,6 +210,25 @@ function foldFull(events) {
     switch (e.type) {
       case 'append': {
         pushLogRow(e);
+        break;
+      }
+      case 'reassert': {
+        // R4. Resolve the identity key to the LIVE row asserting it and bump its
+        // count. Scanning back for the newest live match mirrors the write
+        // path's `WHERE assert_key = ? AND valid_to IS NULL` exactly, so the
+        // fold and db.sqlite cannot disagree about which row a reassert hit.
+        //
+        // A key with NO live row folds to NOTHING — no row invented, no
+        // superseded belief resurrected, no throw. That matters because
+        // compaction supersedes entries by appending, so a reassert whose target
+        // was later rolled up is not an anomaly, it is the steady state.
+        for (let i = rows.length - 1; i >= 0; i--) {
+          const r = rows[i];
+          if (r.assert_key === e.assert_key && r.valid_to == null) {
+            r.occurrences = (r.occurrences || 1) + 1;
+            break;
+          }
+        }
         break;
       }
       case 'correct': {

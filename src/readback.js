@@ -362,6 +362,13 @@ function matchRows(rows, queryText) {
 
     return ranked.map((a) => {
       const m = byId.get(a.id);
+      // The in-memory table above exists ONLY to compute a bm25 rank, so it
+      // carries just the columns FTS needs. Domain fields that never enter it
+      // must be read back off the ORIGINAL row, which is why R4's outcome /
+      // occurrences are sourced from `rows` (id was assigned as i + 1 in the
+      // insert loop) rather than from `m`. Anything added to the logs row in
+      // future needs the same treatment or it silently arrives as undefined.
+      const orig = rows[a.id - 1] || {};
       return {
         eid: m.eid,
         message: m.message,
@@ -370,6 +377,10 @@ function matchRows(rows, queryText) {
         topics: m.topics,
         importance: m.importance,
         access_count: m.access_count,
+        outcome: orig.outcome == null ? null : orig.outcome,
+        occurrences: Number.isInteger(orig.occurrences) && orig.occurrences > 0
+          ? orig.occurrences
+          : 1,
         termHits: a.termHits,
         score: Math.round(a.sumNegBm25 * 1000) / 1000,
       };
@@ -460,6 +471,16 @@ function rankResults(matches, salient) {
     matched_on: e.matched_on,
     score: e.score,
     collision: e.collision,
+    // R4 failure memory. The reason readback exists is to stop an agent
+    // rebuilding what already happened — and "someone already tried this and it
+    // did NOT work" is the most expensive precedent to miss. Surfacing it here
+    // is what keeps `--outcome` from being a column nobody reads. Normalized to
+    // null when absent so the shape is stable for `--json` consumers (loom's
+    // memory.ts parses this array).
+    outcome: (e.outcome === 'failed' || e.outcome === 'worked') ? e.outcome : null,
+    // How many times the fact was asserted (R4 identity key). 1 for every
+    // pre-v0.8 row and every keyless entry, so the field is always a number.
+    occurrences: Number.isInteger(e.occurrences) && e.occurrences > 0 ? e.occurrences : 1,
     verdict_hint: verdictHint(e.collision, e.matched_on),
   }));
 }
@@ -545,6 +566,14 @@ function printResults(results) {
     const tag = r.collision ? 'COLLISION' : 'related';
     out.push(`[${tag}] ${r.eid}  (score ${r.score})`);
     if (r.matched_on.length) out.push(`  matched on: ${r.matched_on.join(', ')}`);
+    // Lead with the failure when there is one: a precedent that was TRIED and
+    // did not work changes what the reader should do, so it outranks the
+    // generic verdict hint in the printed output.
+    if (r.outcome === 'failed') {
+      out.push(`  ALREADY TRIED — did NOT work${r.occurrences > 1 ? ` (seen ${r.occurrences}x)` : ''}`);
+    } else if (r.outcome === 'worked') {
+      out.push(`  already tried — WORKED${r.occurrences > 1 ? ` (seen ${r.occurrences}x)` : ''}`);
+    }
     out.push(`  ${r.verdict_hint}`);
     out.push('');
   }

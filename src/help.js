@@ -134,6 +134,18 @@ Flags:
   --source <source>    human|agent|hook (default: human)
   --relates <id>       link to a related entry ID
   --corrects <id>      supersede a prior entry (old entry stays searchable, marked corrected)
+  --key <identity>     this is the SAME FACT as before. A repeat assert of a key
+                       that already has a live entry COUNTS instead of adding a
+                       row (and does not grow manual-logs.md), so a job that
+                       re-reports the same finding on every pass leaves one entry
+                       with occurrences=N rather than N copies. Identity is
+                       scoped to the live belief: once an entry is superseded its
+                       key is free again. Ignored alongside --corrects, because
+                       "the belief changed" is not "the same fact again".
+  --outcome <outcome>  failed|worked — did the thing described actually work?
+                       'failed' is the one readback leads with ("ALREADY TRIED —
+                       did NOT work"), so a later agent stops re-running a dead
+                       end instead of rediscovering it.
   --share              publish a foundation entry to the SHARED (committed) log
                        even on a public remote. Foundation entries are
                        PRIVATE-BY-DEFAULT on a PUBLIC remote (they land in the
@@ -148,6 +160,8 @@ ${TIERS}
 Examples:
   pebbl log "threshold is 0.5 because Professional Services touches everything at 0.2" --cat decision
   pebbl log "uses SQLite for the log store" --cat structure --tier foundation
+  pebbl log "recurring mess [sig-4c93ec]" --key sig-4c93ec        # 2nd+ call counts, no duplicate
+  pebbl log "raising the guard threshold to 3 did not cut false positives" --outcome failed
 
 Tip: if you omit --cat, the rubric tries to classify. If it falls
 back to 'uncategorized', pebbl prints a loud warning.

@@ -63,10 +63,10 @@ describe('migrate', () => {
       INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '0.2');
     `);
     migrate(db);
-    // Re-pointed 0.6 -> 0.7: the migration chain now ends at v0.7 (tier-derived
+    // Re-pointed 0.7 -> 0.8: the migration chain now ends at v0.7 (tier-derived
     // importance backfill). The ordering/schema this test cares about is
     // unchanged; only the terminal version moved because a new step was added.
-    assert.strictEqual(getVersion(db), 0.7);
+    assert.strictEqual(getVersion(db), 0.8);
     const cols = db.prepare("PRAGMA table_info(logs)").all();
     const names = cols.map(c => c.name);
     assert(names.includes('category'));
@@ -84,8 +84,8 @@ describe('migrate', () => {
     const db = new Database(dbPath);
     migrate(db);
 
-    // Re-pointed 0.6 -> 0.7: terminal version moved (v0.7 backfill added).
-    assert.strictEqual(getVersion(db), 0.7);
+    // Re-pointed 0.7 -> 0.8: terminal version moved (v0.7 backfill added).
+    assert.strictEqual(getVersion(db), 0.8);
 
     const cols = db.prepare("PRAGMA table_info(logs)").all();
     const names = cols.map(c => c.name);
@@ -115,13 +115,13 @@ describe('migrate', () => {
     const db = new Database(dbPath);
 
     migrate(db);
-    assert.strictEqual(getVersion(db), 0.7); // re-pointed 0.6 -> 0.7
+    assert.strictEqual(getVersion(db), 0.8); // re-pointed 0.7 -> 0.8
 
     assert.doesNotThrow(() => {
       migrate(db);
     });
 
-    assert.strictEqual(getVersion(db), 0.7); // re-pointed 0.6 -> 0.7
+    assert.strictEqual(getVersion(db), 0.8); // re-pointed 0.7 -> 0.8
 
     const cols = db.prepare("PRAGMA table_info(logs)").all();
     const names = cols.map(c => c.name);
@@ -165,9 +165,9 @@ describe('migrate v0.6 (rerank signals)', () => {
     fs.mkdirSync(path.join(dir, '.pebbl'));
     const { openDb } = require('../src/db');
     const db = openDb(path.join(dir, '.pebbl'));
-    // Re-pointed 0.6 -> 0.7: openDb runs the full chain, which now ends at v0.7.
+    // Re-pointed 0.7 -> 0.8: openDb runs the full chain, which now ends at v0.7.
     // The v0.6 rerank columns this test asserts still get added.
-    assert.strictEqual(getVersion(db), 0.7);
+    assert.strictEqual(getVersion(db), 0.8);
     const names = db.prepare('PRAGMA table_info(logs)').all().map(c => c.name);
     for (const c of RERANK_COLS) assert(names.includes(c), `missing column ${c}`);
     db.close();
@@ -179,8 +179,8 @@ describe('migrate v0.6 (rerank signals)', () => {
     db.prepare('INSERT INTO logs (timestamp, message) VALUES (?, ?)')
       .run('2026-01-01T00:00:00.000Z', 'an existing belief');
     migrate(db);
-    // Re-pointed 0.6 -> 0.7: full chain ends at v0.7.
-    assert.strictEqual(getVersion(db), 0.7);
+    // Re-pointed 0.7 -> 0.8: full chain ends at v0.7.
+    assert.strictEqual(getVersion(db), 0.8);
 
     const cols = db.prepare('PRAGMA table_info(logs)').all();
     const names = cols.map(c => c.name);
@@ -210,9 +210,9 @@ describe('migrate v0.6 (rerank signals)', () => {
     const dir = tmpDir();
     const db = v05Db(dir);
     migrate(db);
-    assert.strictEqual(getVersion(db), 0.7); // re-pointed 0.6 -> 0.7
+    assert.strictEqual(getVersion(db), 0.8); // re-pointed 0.7 -> 0.8
     assert.doesNotThrow(() => migrate(db));
-    assert.strictEqual(getVersion(db), 0.7); // re-pointed 0.6 -> 0.7
+    assert.strictEqual(getVersion(db), 0.8); // re-pointed 0.7 -> 0.8
     db.close();
   });
 });
@@ -259,7 +259,7 @@ describe('migrate v0.7 (tier-derived importance backfill)', () => {
     ins.run('2026-01-01T00:00:00.000Z', 'detail', 'hand', 5);
 
     migrate(db);
-    assert.strictEqual(getVersion(db), 0.7);
+    assert.strictEqual(getVersion(db), 0.8);
 
     const imp = (msg) => db.prepare('SELECT importance FROM logs WHERE message = ?').get(msg).importance;
     assert.strictEqual(imp('f'), 5);

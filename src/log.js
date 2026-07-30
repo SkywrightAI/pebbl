@@ -7,7 +7,7 @@ const { openDb } = require('./db');
 const { loadRubric, classifyEntryMulti, atomicityOf, ensureProjectFiles } = require('./rubric');
 const { isThinEntry } = require('./detect-thin');
 const { execFileSync } = require('child_process');
-const { appendLogEvent, appendCorrectLogEvent } = require('./events');
+const { appendLogEvent, appendCorrectLogEvent, appendReassertEvent } = require('./events');
 const { detectRemoteVisibility, redact } = require('./privacy-scan');
 const { guardWrite } = require('./secret-guard');
 const { importanceForTier } = require('./rank');
@@ -49,6 +49,10 @@ function normalizeCategory(cat) {
 const VALID_TIERS = ['foundation', 'component', 'detail', 'fleeting'];
 
 const VALID_SOURCES = ['human', 'agent', 'hook'];
+// R4 outcome — a closed set on purpose. An open string here would drift into
+// synonyms ('fail'/'failed'/'didnt work') and the field would stop being
+// queryable, which is the same way `topics` decayed into an untyped tag soup.
+const VALID_OUTCOMES = ['failed', 'worked'];
 
 function validate(flags) {
   if (flags.cat && !VALID_CATEGORIES.includes(flags.cat)) {
@@ -61,6 +65,10 @@ function validate(flags) {
   }
   if (flags.source && !VALID_SOURCES.includes(flags.source)) {
     console.error(`Invalid source "${flags.source}". Valid: ${VALID_SOURCES.join(', ')}`);
+    process.exit(1);
+  }
+  if (flags.outcome && !VALID_OUTCOMES.includes(flags.outcome)) {
+    console.error(`Invalid outcome "${flags.outcome}". Valid: ${VALID_OUTCOMES.join(', ')}`);
     process.exit(1);
   }
 }
@@ -329,6 +337,53 @@ module.exports = function log(args) {
     }
   }
 
+  // R4 — IDENTITY-KEYED ASSERT. `--key K` says "this is the same fact as before,"
+  // so a repeat must count, not accumulate. Without this branch the custodian's
+  // re-emitted findings pile up (46 copies of one message in ~/loom/.pebbl) and
+  // bury the answer they were meant to surface.
+  //
+  // Identity is scoped to the LIVE belief (`valid_to IS NULL`), the same
+  // predicate every read uses: once a fact is superseded its key is free, so a
+  // reassert can never resurrect a dead row's count.
+  //
+  // --corrects is deliberately excluded. That flag means "the belief CHANGED,"
+  // which is the opposite of "the same fact again" — silently folding it into a
+  // count would drop a correction on the floor.
+  const assertKey = (flags.key != null && String(flags.key).trim() !== '')
+    ? String(flags.key).trim()
+    : null;
+  const outcome = flags.outcome || null;
+  if (assertKey != null && corrects == null) {
+    const live = db.prepare(
+      'SELECT id, occurrences FROM logs WHERE assert_key = ? AND valid_to IS NULL ORDER BY id DESC LIMIT 1'
+    ).get(assertKey);
+    if (live) {
+      const nextCount = (live.occurrences || 1) + 1;
+      db.prepare('UPDATE logs SET occurrences = ? WHERE id = ?').run(nextCount, live.id);
+      // FAIL-CLOSED, same contract as the append path below: if the event does
+      // not land, undo the count so db.sqlite and events.jsonl stay in lockstep.
+      // Nothing else was written — no INSERT, no markdown append — so the
+      // rollback is a single decrement.
+      try {
+        appendReassertEvent(
+          pebblDir,
+          { ts, actor: undefined, assert_key: assertKey, source },
+          (rows) => rebuildEventsView(pebblDir, rows),
+        );
+      } catch (err) {
+        try {
+          db.prepare('UPDATE logs SET occurrences = ? WHERE id = ?').run(live.occurrences || 1, live.id);
+        } catch (rollbackErr) {
+          console.error(`pebbl: ROLLBACK FAILED after event-append failure (${rollbackErr.message}) — db.sqlite and events.jsonl may be out of sync; run pebbl doctor`);
+        }
+        console.error(`pebbl: reassert NOT recorded — events.jsonl append failed (${err.message})`);
+        process.exit(1);
+      }
+      console.error(`pebbl: same fact as #${live.id} (key ${assertKey}) — counted, not duplicated (${nextCount}x)`);
+      return;
+    }
+  }
+
   // Mask secret-shapes only in the COMMITTED markdown projection. The DB INSERT
   // below stores the ORIGINAL `message` verbatim — redact() never touches the
   // authoritative store, only the .md the promote gate scans.
@@ -346,9 +401,9 @@ module.exports = function log(args) {
   // tier-weighted for rerank immediately; access_count/last_accessed keep their
   // column defaults (0 / NULL) and only move when the entry is surfaced on a read.
   const info = db.prepare(`
-    INSERT INTO logs (timestamp, source, category, tier, message, topics, relates_to, corrects, valid_from, valid_to, importance)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
-  `).run(ts, source, category, tier, message, topics, relatesTo, corrects, ts, importance);
+    INSERT INTO logs (timestamp, source, category, tier, message, topics, relates_to, corrects, valid_from, valid_to, importance, assert_key, occurrences, outcome)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 1, ?)
+  `).run(ts, source, category, tier, message, topics, relatesTo, corrects, ts, importance, assertKey, outcome);
   const newId = Number(info.lastInsertRowid);
 
   // On --corrects, stamp the TARGET's valid_to (when it stopped being true) and
@@ -403,14 +458,14 @@ module.exports = function log(args) {
     if (corrects != null) {
       appendCorrectLogEvent(
         pebblDir,
-        { ts, category, tier, message, topics, source, correctsLocalId: corrects },
+        { ts, category, tier, message, topics, source, correctsLocalId: corrects, assert_key: assertKey, outcome },
         (rows) => rebuildEventsView(pebblDir, rows),
         { local },
       );
     } else {
       appendLogEvent(
         pebblDir,
-        { ts, category, tier, message, topics, source },
+        { ts, category, tier, message, topics, source, assert_key: assertKey, outcome },
         (rows) => rebuildEventsView(pebblDir, rows),
         { local },
       );

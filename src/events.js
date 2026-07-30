@@ -118,6 +118,42 @@ function sourceField({ source } = {}) {
   return source ? { source: String(source) } : {};
 }
 
+// Optional R4 assert tail (assert_key / occurrences / outcome). PRESENT-ONLY,
+// exactly like lessonFields and sourceField: a field is stamped only when the
+// caller supplied a real value, so an event without them serializes
+// byte-for-byte as before and an old line folds unchanged. `occurrences` is
+// stamped only when it is a meaningful count (>1 would be a lie on a first
+// append, so callers pass it only where it is real); the fold's `reassert` case
+// owns incrementing thereafter, which keeps ONE writer for the count.
+function assertFields({ assert_key, occurrences, outcome } = {}) {
+  const out = {};
+  if (assert_key != null && String(assert_key).trim() !== '') {
+    out.assert_key = String(assert_key);
+  }
+  if (Number.isInteger(occurrences) && occurrences > 0) {
+    out.occurrences = occurrences;
+  }
+  if (outcome === 'failed' || outcome === 'worked') {
+    out.outcome = outcome;
+  }
+  return out;
+}
+
+// Build a `reassert` event — "this exact fact was asserted again." It carries
+// ONLY the identity key, never the message: the message already lives on the
+// original `append`, and re-shipping it would reintroduce the duplication this
+// primitive exists to remove. The fold resolves the key to the live row and
+// increments its count; a key with no live row folds to nothing (see fold.js),
+// so a reassert can never resurrect a superseded belief or invent a row.
+function makeReassertEvent(pebblDir, fields = {}) {
+  const { ts, actor, assert_key } = fields;
+  return {
+    ...makeEnvelope(pebblDir, 'reassert', { ts, actor }),
+    assert_key: String(assert_key),
+    ...sourceField(fields),
+  };
+}
+
 // Build an `append` event envelope. Caller supplies the domain fields; the
 // envelope head (eid/ts/emitted_at/actor/v) comes from makeEnvelope. The
 // optional source + lesson tails (source, signature/fix_altitude_claimed/
@@ -135,6 +171,7 @@ function makeAppendEvent(pebblDir, fields = {}) {
       : (topics ? String(topics).split(',').map((t) => t.trim()).filter(Boolean) : []),
     ...sourceField(fields),
     ...lessonFields(fields),
+    ...assertFields(fields),
   };
 }
 
@@ -397,6 +434,18 @@ function appendLogEvent(pebblDir, fields, rebuild, opts = {}) {
   });
 }
 
+// High-level entry for a repeat assert (`pebbl log --key K` where K already has
+// a live row). Same lock + fail-closed contract as appendLogEvent: a throw means
+// no event was appended, so log.js can roll its canonical UPDATE back.
+function appendReassertEvent(pebblDir, fields, rebuild, opts = {}) {
+  return withLock(pebblDir, () => {
+    const event = makeReassertEvent(pebblDir, fields);
+    appendEvent(pebblDir, event, { local: !!opts.local });
+    const rows = foldAndRebuild(pebblDir, rebuild);
+    return { event, rows };
+  });
+}
+
 // High-level entry for `pebbl log --corrects N`: append a `correct` event that
 // carries the corrected entry's EID, then rebuild the view inline — the whole
 // thing under the per-store lock so the eid resolution and the append can't
@@ -475,6 +524,7 @@ module.exports = {
   resolveActor,
   makeEnvelope,
   makeAppendEvent,
+  makeReassertEvent,
   makeCorrectEvent,
   makeSupersedeEvent,
   makeResolveEvent,
@@ -489,5 +539,6 @@ module.exports = {
   fold,
   foldFull,
   appendLogEvent,
+  appendReassertEvent,
   appendCorrectLogEvent,
 };

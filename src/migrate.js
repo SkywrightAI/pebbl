@@ -139,6 +139,39 @@ function migrate(db, opts = {}) {
     setVersion(db, 0.7);
     note('pebbl: migrated db to v0.7 (tier-derived importance backfill)');
   }
+  if (version < 0.8) {
+    // R4 — identity-keyed assert + outcome. The measured problem: 711 append
+    // events in ~/loom/.pebbl fold to 487 distinct messages, with ONE message
+    // stored 46 times (the custodian re-emitting the same site-anchored finding
+    // on every maintenance pass). `append(prose)` is not idempotent; an assert
+    // carrying an identity key is. These three columns are what makes that
+    // possible, and they are strictly additive:
+    //   assert_key  — the caller's identity for this fact (NULL = keyless, the
+    //                 unchanged default path; dedup NEVER applies without it).
+    //   occurrences — how many times the fact has been asserted. Kept (not
+    //                 discarded) so `recurrence` can read frequency off one row
+    //                 instead of counting duplicates.
+    //   outcome     — 'failed' | 'worked' | NULL. Makes "we tried this and it
+    //                 did not work" first-class, so a retry can see it.
+    // Every existing row keeps the defaults (NULL / 1 / NULL), which is exactly
+    // what a pre-v0.8 entry means: no identity, asserted once, outcome unknown.
+    const cols = new Set(db.prepare('PRAGMA table_info(logs)').all().map(c => c.name));
+    if (!cols.has('assert_key')) {
+      db.exec('ALTER TABLE logs ADD COLUMN assert_key TEXT DEFAULT NULL;');
+    }
+    if (!cols.has('occurrences')) {
+      db.exec('ALTER TABLE logs ADD COLUMN occurrences INTEGER DEFAULT 1;');
+    }
+    if (!cols.has('outcome')) {
+      db.exec('ALTER TABLE logs ADD COLUMN outcome TEXT DEFAULT NULL;');
+    }
+    // Identity is scoped to LIVE beliefs: a superseded row's key is free again,
+    // so the lookup is (assert_key, valid_to IS NULL). Index the key column so
+    // that lookup stays cheap as the store grows — it runs on every keyed write.
+    db.exec('CREATE INDEX IF NOT EXISTS idx_logs_assert_key ON logs(assert_key);');
+    setVersion(db, 0.8);
+    note('pebbl: migrated db to v0.8 (identity-keyed assert + outcome)');
+  }
 }
 
 module.exports = { migrate, getVersion };

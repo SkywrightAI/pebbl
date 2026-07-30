@@ -118,15 +118,15 @@ describe('rebuild-from-events leaves the store at the current schema version', (
     try {
       const quietDb = makeV05();
       migrate(quietDb, { quiet: true });
-      assert.equal(getVersion(quietDb), 0.7, 'quiet still migrates all the way');
+      assert.equal(getVersion(quietDb), 0.8, 'quiet still migrates all the way');
       assert.equal(captured.length, 0, `quiet migrate must print nothing (got: ${captured.join(' | ')})`);
       quietDb.close();
 
       const loudDb = makeV05();
       migrate(loudDb);
-      assert.equal(getVersion(loudDb), 0.7);
+      assert.equal(getVersion(loudDb), 0.8);
       assert.ok(captured.some((m) => /migrated db to v0\.6/.test(m)), 'default migrate still announces v0.6');
-      assert.ok(captured.some((m) => /migrated db to v0\.7/.test(m)), 'default migrate still announces v0.7');
+      assert.ok(captured.some((m) => /migrated db to v0\.8/.test(m)), 'default migrate still announces v0.8');
       loudDb.close();
     } finally {
       console.error = realError;
