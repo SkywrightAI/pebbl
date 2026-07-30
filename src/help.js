@@ -113,10 +113,30 @@ paths (.env / .claude-env / /etc/*-bot.env), token shapes, and PII names from
 the repo's anon name-map. Emits a per-finding rotation checklist (file,
 commit, line, class, ROTATE/ACCEPT prompt).
 
-READ-ONLY: it never edits, redacts, force-pushes, or stages anything. A real
-leaked secret must be ROTATED at its source — this tool only surfaces it.
-Run it before taking any store \`--shared\`, and pair it with the pre-commit /
-pre-push gate that scans every new commit/push going forward.
+READ-ONLY by default: the scan never edits, redacts, force-pushes, or stages
+anything. A real leaked secret must be ROTATED at its source — this tool only
+surfaces it. Run it before taking any store \`--shared\`, and pair it with the
+pre-commit / pre-push gate that scans every new commit/push going forward.
+
+Recording decisions (the only writes this command makes, and only to the
+ledger file — never to git history):
+  --accept <id> --reason "..."   record an ACCEPT so the pre-push gate stops
+                                 re-asking about this finding
+  --accept all --reason "..."    accept every finding currently listed
+  --revoke <id>                  un-accept; it blocks pushes again
+  --list-accepted                show every recorded decision
+
+Why accepts are needed: a finding inside a commit that is ALREADY on the public
+remote can never be scrubbed without rewriting published history, which
+append-only memory refuses to do. Without a ledger the pre-push gate would block
+forever and the only way out would be PEBBL_SKIP_SCAN — which trains you to
+always skip it, disarming the gate for the day a REAL leak appears. An accept is
+scoped to one leaked string in one file (not one commit), requires a written
+reason, and never hides a NEW finding. The ledger is committed so a clone
+inherits the decisions; a corrupt one fails CLOSED and accepts nothing.
+
+For a doc that must QUOTE a leak example (this scanner's own spec did), put
+\`allowlist-secret\` on that line — a line-scoped, greppable exemption.
 `,
   init: `pebbl init — set up .pebbl/ in current project
 

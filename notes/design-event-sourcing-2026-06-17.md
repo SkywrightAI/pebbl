@@ -41,7 +41,16 @@ This is the one lens that favors flipping the source of truth. The earlier OKF e
 
 **Privacy** (load-bearing chosen constraint, hardened to the four killed-verdict fixes - the naive scanner failed all three named leak classes against the live store):
 1. Scan in git PRE-COMMIT and PRE-PUSH on every commit, not one-shot at init.
-2. Scanner covers the three classes the live store actually leaks: all non-RFC1918 IPs and host:port pairs, credential FILE PATHS (`.env`, `.claude-env`, `/etc/*-bot.env`), and a PII/name denylist seeded from the repo's anon name-map. Token-shape regex alone is insufficient.
+2. Scanner covers the three classes the live store actually leaks: all non-RFC1918 IPs and host:port pairs, credential FILE PATHS (`.env`, `.claude-env`, `/etc/*-bot.env`), and a PII/name denylist seeded from the repo's anon name-map. Token-shape regex alone is insufficient. <!-- allowlist-secret: this line SPECIFIES the cred-path patterns, so it necessarily contains them -->
+
+<!--
+This section quotes the very strings the scanner detects, so it used to flag
+itself on every run — the fake weapon airport screeners send through the X-ray
+to check the operator is awake, reported as a real one. Lines that must quote a
+leak example carry `allowlist-secret`; the exemption is line-scoped and
+`git grep allowlist-secret` lists every one of them.
+-->
+
 3. Foundation tier is PRIVATE-BY-DEFAULT; publishing a foundation entry needs explicit per-entry `--share`.
 4. Two-file split: `events.jsonl` (committed, shared only) + `events.local.jsonl` (always gitignored, private); the fold reads both, git transports only the shared file. Honest scope: this materially reduces leak probability; append-only can't forget, so it is not "will not leak." A real leaked secret must be ROTATED, not redacted.
 
@@ -57,7 +66,9 @@ This is the one lens that favors flipping the source of truth. The earlier OKF e
 
 ## Precondition (present security finding, not part of the build)
 
-The leak is **already in committed git history.** sw-factory's tracked `manual-logs.md` (174 commits, put there by `52d7cb2` "Track pebbl markdown history") contains: droplet public IP+port `67.207.93.196:48422` (11 lines), the `sk-ant-oat01-` OAuth token shape, and credential paths `/root/.claude-env`, `/etc/factory-updates-bot.env`, `/etc/bookforge-bot.env`, `/factory/etc/sw-factory-bot.env`. P5's forward gate scans new pushes, not existing history. Before any store is eligible for `--shared`, run `pebbl audit-history` over all committed `.md` history and produce a rotation checklist. The droplet IP and bot.env paths need a rotate-vs-accept decision independent of this project.
+The leak is **already in committed git history.** sw-factory's tracked `manual-logs.md` (174 commits, put there by `52d7cb2` "Track pebbl markdown history") contains: droplet public IP+port `67.207.93.196:48422` (11 lines), the `sk-ant-oat01-` OAuth token shape, and credential paths `/root/.claude-env`, `/etc/factory-updates-bot.env`, `/etc/bookforge-bot.env`, `/factory/etc/sw-factory-bot.env`. <!-- allowlist-secret: naming the already-published leak IS this section's subject --> P5's forward gate scans new pushes, not existing history. Before any store is eligible for `--shared`, run `pebbl audit-history` over all committed `.md` history and produce a rotation checklist. The droplet IP and bot.env paths need a rotate-vs-accept decision independent of this project.
+
+**Resolved 2026-07-30.** The rotate-vs-accept decision above is now recorded, not just prompted for. `audit-history` writes accepted findings to `.pebbl-audit-accepted.json` (committed, fails closed) and the pre-push gate blocks only on UNACCEPTED ones. This closes a deadlock the original design missed: a finding inside an already-pushed commit can never be scrubbed without rewriting public history, so the hard gate blocked every subsequent push and the only exit was `PEBBL_SKIP_SCAN` — a gate you must skip every time is one you have already stopped reading. Status of these specific findings: the droplet host:port was verified dead (port closed, host up with SSH), and the credential entries are file PATHS rather than credentials, so both are ACCEPTED with that reason. The `sk-ant-oat01-` reference is a token SHAPE, not a value.
 
 ## Resolved decisions (Ashley, 2026-06-17)
 

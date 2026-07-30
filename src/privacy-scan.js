@@ -44,6 +44,24 @@ function isValidOctet(n) {
   return n >= 0 && n <= 255;
 }
 
+// RFC5737 documentation ranges: addresses reserved so that docs, examples, and
+// TESTS can print an IP that is guaranteed never to route anywhere real. An
+// address from these blocks cannot BE infrastructure, so flagging one is a pure
+// false positive — the same reasoning that exempts RFC1918, arrived at from the
+// other direction (private = not reachable from outside; documentation = not
+// reachable at all).
+//
+// This matters more than it looks: without it, this scanner's own test suite
+// cannot be committed, because a test for "detects a public host:port" has to
+// contain a public host:port. A tool whose tests trip its own gate ends up with
+// the gate disabled, not with better tests.
+function isDocumentationIp(a, b, c) {
+  if (a === 192 && b === 0 && c === 2) return true;           // 192.0.2.0/24   TEST-NET-1
+  if (a === 198 && b === 51 && c === 100) return true;        // 198.51.100.0/24 TEST-NET-2
+  if (a === 203 && b === 0 && c === 113) return true;         // 203.0.113.0/24 TEST-NET-3
+  return false;
+}
+
 // RFC1918 + loopback + link-local + "this host" — local infra, never a leak.
 function isPrivateIp(a, b, c, d) {
   if (a === 10) return true;                                  // 10.0.0.0/8
@@ -52,7 +70,8 @@ function isPrivateIp(a, b, c, d) {
   if (a === 127) return true;                                 // loopback
   if (a === 169 && b === 254) return true;                    // link-local
   if (a === 0) return true;                                   // 0.0.0.0/8 "this host"
-  void c; void d;
+  if (isDocumentationIp(a, b, c)) return true;                // RFC5737 — see above
+  void d;
   return false;
 }
 
@@ -302,6 +321,26 @@ function findNames(text, denylist) {
   return out;
 }
 
+// ── the deliberate-example marker ────────────────────────────────────────────
+// A line carrying this marker is exempt from EVERY leak class.
+//
+// It exists because a security scanner's own documentation has to quote the
+// things it detects, so the doc that specifies this detector trips it — the
+// fake weapon airport screeners slide through the X-ray to check the operator
+// is awake, flagged as a real one. Without an exemption the only fixes are to
+// weaken the patterns (losing real detections) or to skip the gate (losing the
+// gate). A marker keeps both.
+//
+// The marker is deliberately a plain, greppable string rather than a clever
+// syntax: `git grep allowlist-secret` enumerates every exemption in the repo in
+// one command, which is the property that makes an exemption reviewable. It is
+// scoped to the LINE, never the file, so it can't quietly widen over time.
+//
+// This is the single definition — src/secret-guard.js imports it from here so
+// the store-write guard and the git-hook detector can never disagree about what
+// an exemption looks like.
+const ALLOWLIST_MARKER = 'allowlist-secret';
+
 // ── the core: scan one chunk of text ─────────────────────────────────────────
 // Returns an array of hits: { class, match, line, index }. `class` is one of
 // 'network' | 'cred-path' | 'token' | 'name'. Empty array => clean.
@@ -316,6 +355,10 @@ function scan(text, opts = {}) {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const lineNo = i + 1;
+    // A marked line is a deliberate example (see ALLOWLIST_MARKER). Skip it
+    // before any detector runs, so the exemption covers every class uniformly
+    // rather than whichever ones someone remembered to wire it into.
+    if (line.includes(ALLOWLIST_MARKER)) continue;
     for (const ip of findPublicIps(line)) {
       hits.push({
         class: 'network',
@@ -492,14 +535,61 @@ function execGitRaw(repoRoot, args) {
   }
 }
 
-// Added lines of the staged diff (lines starting with '+', minus the +++ header).
-function stagedAddedText(repoRoot) {
+// Added lines of the staged diff, grouped BY FILE.
+//
+// Per-file rather than one concatenated blob for two reasons: the block message
+// can name the file, and — the reason this exists — the accept ledger has to be
+// exempt. The ledger's whole job is to record the matched strings an operator
+// has reviewed, so scanning it re-flags every accept and the file can never be
+// committed. Same self-reference as the scanner's own spec doc, but a JSON file
+// can't carry a line marker, so the exemption is by exact path.
+//
+// The exemption is deliberately ONE fixed filename at the repo root, not a
+// pattern: a leak can't be smuggled past the gate by naming a file cleverly,
+// and `audit-ledger.js` refuses to write a token-class value into it in the
+// first place, so the one file this skips can never hold a live secret shape.
+function stagedAddedByFile(repoRoot) {
   const diff = execGitRaw(repoRoot, ['diff', '--cached', '--unified=0', '--no-color']);
-  const added = [];
+  const files = [];
+  let current = null;
+  let nextLineNo = 0;
   for (const line of diff.split('\n')) {
-    if (line.startsWith('+') && !line.startsWith('+++')) added.push(line.slice(1));
+    if (line.startsWith('+++ ')) {
+      // '+++ b/path/to/file' — or '+++ /dev/null' for a deletion.
+      const p = line.slice(4).replace(/^b\//, '').trim();
+      current = p === '/dev/null' ? null : { path: p, added: new Map() };
+      if (current) files.push(current);
+      continue;
+    }
+    if (line.startsWith('@@')) {
+      // '@@ -old,n +new,m @@' — `new` is where this hunk's added lines land in
+      // the post-commit file. Tracked so a reported line number is the line the
+      // author can actually jump to; without it the numbers are positions in a
+      // synthetic added-lines blob, which sends you to the wrong place in a
+      // long diff and quietly erodes trust in the whole message.
+      const m = /^@@ -\d+(?:,\d+)? \+(\d+)/.exec(line);
+      if (m) nextLineNo = Number(m[1]);
+      continue;
+    }
+    if (line.startsWith('+') && current) {
+      current.added.set(nextLineNo, line.slice(1));
+      nextLineNo += 1;
+    }
   }
-  return added.join('\n');
+  const { LEDGER_FILENAME } = require('./audit-ledger');
+  return files
+    .filter((f) => f.path !== LEDGER_FILENAME)
+    .map((f) => ({ path: f.path, lines: f.added }));
+}
+
+// Scan one staged file's added lines, reporting each hit at its REAL line
+// number in the post-commit file rather than at an offset into a synthetic blob.
+function scanStagedFile(file, opts) {
+  const hits = [];
+  for (const [lineNo, text] of file.lines) {
+    for (const h of scan(text, opts)) hits.push({ ...h, line: lineNo });
+  }
+  return hits;
 }
 
 function repoRootOf(startDir) {
@@ -548,29 +638,58 @@ function cli(args) {
     // scan the working-tree *.md plus the full history when public.
     if (vis.visibility === 'public') {
       const hits = fullHistoryMdHits(repoRoot, opts);
-      if (hits.length) {
-        printHits('committed .md history (public remote — hard gate)', hits.slice(0, 50));
-        console.error(`\nThis remote is PUBLIC (${vis.reason}). A shared push is blocked until`);
-        console.error('`pebbl audit-history` is clean. Rotate/resolve the findings, then push.');
+      // Subtract the operator's recorded ACCEPT decisions. Without this the gate
+      // deadlocks: a finding in an ALREADY-PUSHED commit can never be cleaned
+      // without rewriting published history, so the gate would block every
+      // future push forever and train the operator to always set
+      // PEBBL_SKIP_SCAN — disarming it for the day a real leak appears. The
+      // ledger fails closed, so an unreadable one accepts nothing.
+      const { loadLedger, partition } = require('./audit-ledger');
+      const ledger = loadLedger(repoRoot);
+      if (ledger.error) {
+        console.error(`\npebbl privacy-scan: the accept ledger at ${ledger.path} is unreadable (${ledger.error}).`);
+        console.error('Failing closed — every finding counts as unaccepted until it is fixed.');
+      }
+      const { blocking, accepted } = partition(hits, ledger.accepted);
+      if (blocking.length) {
+        printHits('committed .md history (public remote — hard gate)', blocking.slice(0, 50));
+        console.error(`\nThis remote is PUBLIC (${vis.reason}). A shared push is blocked until every`);
+        console.error('finding above is either ROTATED at its source or explicitly ACCEPTED:');
+        console.error('  pebbl audit-history                       review the full list');
+        console.error('  pebbl audit-history --accept <id> --reason "..."   record a decision');
+        if (accepted.length) {
+          console.error(`\n(${accepted.length} previously accepted finding${accepted.length === 1 ? '' : 's'} did not block this push.)`);
+        }
         process.exit(1);
       }
     }
     process.exit(0);
   }
 
-  // pre-commit (--staged) or stdin (default).
-  let text;
-  let label;
+  // pre-commit (--staged): scan each staged file's added lines separately, so a
+  // hit can name its file and the accept ledger can be exempted by path.
   if (argv.includes('--staged')) {
-    text = stagedAddedText(repoRoot);
-    label = 'the staged diff';
-  } else {
-    label = 'input';
-    try { text = require('fs').readFileSync(0, 'utf8'); } catch { text = ''; }
+    const denylist = loadDenylist(opts);
+    const scanOpts = { ...opts, _denylist: denylist };
+    const flat = [];
+    for (const f of stagedAddedByFile(repoRoot)) {
+      for (const h of scanStagedFile(f, scanOpts)) {
+        flat.push({ ...h, detail: `${h.detail} in ${f.path}` });
+      }
+    }
+    if (flat.length) {
+      printHits('the staged diff', flat);
+      process.exit(1);
+    }
+    process.exit(0);
   }
+
+  // stdin (default) — composable / testable.
+  let text = '';
+  try { text = require('fs').readFileSync(0, 'utf8'); } catch { text = ''; }
   const hits = scan(text, opts);
   if (hits.length) {
-    printHits(label, hits);
+    printHits('input', hits);
     process.exit(1);
   }
   process.exit(0);
@@ -581,6 +700,7 @@ module.exports = {
   scanFiles,
   redact,
   REDACTED,
+  ALLOWLIST_MARKER,
   cli,
   loadDenylist,
   detectRemoteVisibility,
@@ -596,6 +716,7 @@ module.exports = {
     findTokens,
     findNames,
     isPrivateIp,
+    isDocumentationIp,
     loadDenylist,
     detectRemoteVisibility,
     parseGitHost,

@@ -15,9 +15,14 @@ const KNOWN_FLAGS = new Set([
   'json', 'all', // doctor: machine-readable output; widen past conservative caps
   'strict', // log: FAIL (exit 1, store nothing) on a non-atomic multi-fact entry
   'metrics', // doctor: short-circuit to the quantitative atomicity scoreboard
+  // audit-history: record rotate-vs-accept decisions durably. `--accept <id|all>`
+  // needs `--reason` (an unexplained accept is a rubber stamp), `--revoke <id>`
+  // undoes one, `--list-accepted` prints the ledger. Registering them here is
+  // what keeps parseArgs from demoting them to positional text.
+  'accept', 'revoke', 'reason', 'list-accepted',
 ]);
 
-const BOOLEAN_FLAGS = new Set(['preview', 'execute', 'latest', 'list', 'close', 'open', 'list-open', 'show', 'generate', 'include-archive', 'deep', 'refresh', 'share', 'json', 'all', 'strict', 'metrics', 'no-doc']);
+const BOOLEAN_FLAGS = new Set(['preview', 'execute', 'latest', 'list', 'close', 'open', 'list-open', 'show', 'generate', 'include-archive', 'deep', 'refresh', 'share', 'json', 'all', 'strict', 'metrics', 'no-doc', 'list-accepted']);
 
 // Flags that may legitimately be given more than once. A repeat ACCUMULATES
 // into an array instead of overwriting — the old behavior silently kept only the
@@ -26,7 +31,7 @@ const BOOLEAN_FLAGS = new Set(['preview', 'execute', 'latest', 'list', 'close', 
 // keys (even a single use), so consumers handle one shape. handoff.js's
 // joinField folds the array back into the one ';'-separated string the table
 // stores, so `--done "a; b"` and `--done a --done b` converge.
-const MULTI_FLAGS = new Set(['done', 'todo', 'blocked']);
+const MULTI_FLAGS = new Set(['done', 'todo', 'blocked', 'accept', 'revoke']);
 
 // Assign a parsed flag value, accumulating repeats for MULTI_FLAGS.
 function setFlag(flags, key, value) {

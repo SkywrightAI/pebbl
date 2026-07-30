@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "accepted": [
+    {
+      "id": "0896235d2084",
+      "class": "cred-path",
+      "file": "notes/design-event-sourcing-2026-06-17.md",
+      "reason": "Credential file PATHS, not credentials. Already published in this public repo's history since the sw-factory era and un-scrubbable without rewriting public history. Knowing a path grants nothing without root on the host.",
+      "acceptedAt": "2026-07-30T22:39:30.290Z",
+      "match": "-bot.env"
+    },
+    {
+      "id": "09bac6f47eae",
+      "class": "cred-path",
+      "file": "notes/design-event-sourcing-2026-06-17.md",
+      "reason": "Credential file PATHS, not credentials. Already published in this public repo's history since the sw-factory era and un-scrubbable without rewriting public history. Knowing a path grants nothing without root on the host.",
+      "acceptedAt": "2026-07-30T22:39:30.290Z",
+      "match": "/root/.claude-env"
+    },
+    {
+      "id": "6c977b693ec5",
+      "class": "network",
+      "file": "notes/design-event-sourcing-2026-06-17.md",
+      "reason": "Droplet host:port, verified 2026-07-30: host up but this port CLOSED, so it names a dead service. Already published and un-scrubbable. Residual exposure is the bare IP with SSH listening; the answer there is SSH hardening on the host, not redaction here.",
+      "acceptedAt": "2026-07-30T22:39:38.510Z",
+      "match": "67.207.93.196:48422"
+    },
+    {
+      "id": "f0f50f067b26",
+      "class": "cred-path",
+      "file": "notes/design-event-sourcing-2026-06-17.md",
+      "reason": "Credential file PATHS, not credentials. Already published in this public repo's history since the sw-factory era and un-scrubbable without rewriting public history. Knowing a path grants nothing without root on the host.",
+      "acceptedAt": "2026-07-30T22:39:30.290Z",
+      "match": "/etc/factory-updates-bot.env"
+    }
+  ]
+}

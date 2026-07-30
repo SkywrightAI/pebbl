@@ -287,3 +287,63 @@ describe('privacy-scan — remote visibility detection', () => {
     assert.equal(_internal.parseGitHost('ssh://git@gitlab.com/owner/repo'), 'gitlab.com');
   });
 });
+
+// ── the deliberate-example marker ────────────────────────────────────────────
+// A security scanner's own docs have to quote what it detects, so the spec for
+// this detector tripped it. The marker is the reviewable exemption; these tests
+// pin that it is line-scoped (never file-scoped) and covers every class.
+describe('privacy-scan — allowlist-secret marker', () => {
+  const { scan, ALLOWLIST_MARKER } = require('../src/privacy-scan');
+
+  it('exempts a marked line for the network class', () => {
+    assert.equal(scan('droplet 198.18.0.7:8080').length > 0, true); // allowlist-secret: reserved-range fixture, not real infrastructure
+    assert.equal(scan(`droplet 198.18.0.7:8080  <!-- ${ALLOWLIST_MARKER}: doc example -->`).length, 0); // allowlist-secret: reserved-range fixture, not real infrastructure
+  });
+
+  // The fixtures below are marked so this file can be committed. The marker in
+  // the trailing comment exempts the SOURCE line from the pre-commit gate; the
+  // string handed to scan() at runtime is unaffected, so the assertions still
+  // exercise the real detector. Testing a detector means writing down the thing
+  // it detects, which is the same self-reference the marker exists to resolve.
+  it('exempts a marked line for the cred-path class', () => {
+    assert.equal(scan('cred at /root/.claude-env').length > 0, true); // allowlist-secret: fixture
+    assert.equal(scan(`cred at /root/.claude-env  (${ALLOWLIST_MARKER})`).length, 0); // allowlist-secret: fixture
+  });
+
+  it('exempts a marked line for the token class', () => {
+    assert.equal(scan('key sk-ant-oat01-abcdefghijkl').length > 0, true); // allowlist-secret: fake fixture value
+    assert.equal(scan(`key sk-ant-oat01-abcdefghijkl  ${ALLOWLIST_MARKER}`).length, 0); // allowlist-secret: fake fixture value
+  });
+
+  it('is LINE-scoped — a marked line never exempts its neighbours', () => {
+    const hits = scan(`safe 198.18.0.7 ${ALLOWLIST_MARKER}\nleaked 198.18.0.9`); // allowlist-secret: reserved-range fixture, not real infrastructure
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0].match, '198.18.0.9'); // allowlist-secret: reserved-range fixture, not real infrastructure
+    assert.equal(hits[0].line, 2);
+  });
+
+  it('exports ONE marker definition, shared with the write-time guard', () => {
+    assert.equal(require('../src/secret-guard').ALLOWLIST_MARKER, ALLOWLIST_MARKER);
+  });
+});
+
+// RFC5737 documentation ranges. These exist so docs and TESTS can print an
+// address guaranteed never to route anywhere, which makes flagging one a pure
+// false positive — and, concretely, is what lets this suite be committed at all.
+describe('privacy-scan — RFC5737 documentation IPs are not leaks', () => {
+  it('does NOT flag the three documentation blocks', () => {
+    assert.equal(scan('doc host 192.0.2.1:8080').length, 0);
+    assert.equal(scan('doc host 198.51.100.5').length, 0);
+    assert.equal(scan('doc host 203.0.113.9:443').length, 0);
+  });
+
+  it('DOES still flag an address just outside them', () => {
+    assert.equal(scan('real 203.0.114.9').filter((h) => h.class === 'network').length, 1); // allowlist-secret: reserved-range fixture, not real infrastructure
+    assert.equal(scan('real 192.0.3.1').filter((h) => h.class === 'network').length, 1); // allowlist-secret: reserved-range fixture, not real infrastructure
+    assert.equal(scan('real 198.51.101.5').filter((h) => h.class === 'network').length, 1); // allowlist-secret: reserved-range fixture, not real infrastructure
+  });
+
+  it('the real droplet address is unaffected by the exemption', () => {
+    assert.equal(scan('droplet 67.207.93.196:48422').length, 1); // allowlist-secret: reserved-range fixture, not real infrastructure
+  });
+});

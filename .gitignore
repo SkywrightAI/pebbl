@@ -1,6 +1,10 @@
 node_modules/
 *.log
-.pebbl/
+# No trailing slash: the store is sometimes a SYMLINK to a store kept outside
+# the worktree, and a `dir/` pattern matches only real directories, so `.pebbl/`
+# alone left a symlinked store showing up as untracked (one `git add -A` away
+# from committing an absolute path that means nothing on another machine).
+.pebbl
 .DS_Store
 # pnpm is the single source of truth (see package.json packageManager +
 # pnpm-workspace.yaml security config). Don't let `npm install` re-add its lockfile.

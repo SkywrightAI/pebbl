@@ -22,11 +22,13 @@
 //   - PEBBL_SECRET_GUARD env: `block` (default when unset) | `warn` (stderr,
 //     still writes — for migration) | `off` (silent, the full escape valve).
 
-const { scan } = require('./privacy-scan');
+const { scan, ALLOWLIST_MARKER } = require('./privacy-scan');
 
-// The marker that whitelists a deliberate fixture line. Same convention the
-// redaction tests + factory fixtures already use (`allowlist-secret`).
-const ALLOWLIST_MARKER = 'allowlist-secret';
+// The marker lives in privacy-scan (the shared detector) so there is exactly
+// ONE definition of what an exemption looks like. scan() now also skips marked
+// lines itself; the per-line check below is kept as the guard's own explicit
+// contract, so this module still reads as "unmarked tokens block" on its face
+// rather than depending on a detail of a module it merely calls.
 
 // Read + normalize the guard mode. Anything unrecognized falls back to block,
 // so a typo'd env never silently disables the gate.
