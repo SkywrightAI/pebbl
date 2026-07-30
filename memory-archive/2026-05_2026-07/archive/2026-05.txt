@@ -1,0 +1,12 @@
+=== Archived 2026-05-23T16:41:09.469Z ===
+[id:22] [detail|decision] topics:compact-demo — compact test decision 1
+[id:23] [detail|decision] topics:compact-demo — compact test decision 2
+[id:24] [detail|decision] topics:compact-demo — compact test decision 3
+[id:25] [detail|decision] topics:compact-demo — compact test decision 4
+[id:26] [detail|decision] topics:compact-demo — compact test decision 5
+[id:27] [detail|decision] topics:compact-demo — compact test decision 6
+[id:28] [detail|decision] topics:compact-demo — compact test decision 7
+[id:29] [detail|decision] topics:compact-demo — compact test decision 8
+[id:30] [detail|decision] topics:compact-demo — compact test decision 9
+[id:31] [detail|decision] topics:compact-demo — compact test decision 10
+---

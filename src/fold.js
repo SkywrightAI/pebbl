@@ -80,7 +80,11 @@ const KNOWN_TYPES = new Set([
   // stream WITHOUT them folds byte-identically to before, and a stream WITH them
   // leaves every existing projection untouched. A registry of cadence contracts
   // (`liveness-register`) plus the heartbeats that satisfy them (`heartbeat`).
-  'liveness-register', 'heartbeat',
+  // `liveness-retire` supersedes a contract when the job is decommissioned.
+  // Without it a registration is permanent, so a retired job demands beats
+  // forever and sits OVERDUE — one immortal false alarm, which is how an
+  // operator learns to ignore the whole check.
+  'liveness-register', 'heartbeat', 'liveness-retire',
   // Commit capture. migrate-to-events has minted `commit` events since P2 and
   // log-commit.js appends one per captured commit; folding them into the
   // `commits` side channel is what lets a rebuild-from-events REGENERATE the
@@ -357,6 +361,27 @@ function foldFull(events) {
         cur.every = e.every == null ? '' : String(e.every);
         cur.grace = e.grace == null ? '' : String(e.grace);
         cur.registered_at = e.ts;            // sorted order: latest register ts
+        // Re-registering REVIVES a retired job. Registration is the act of
+        // saying "watch this again", so it must clear the retirement or the
+        // only way back would be to hand-edit the log.
+        cur.retired_at = null;
+        cur.retired_reason = null;
+        liveness.set(e.name, cur);
+        break;
+      }
+      case 'liveness-retire': {
+        // Mark the contract retired; do NOT delete the row. The register and
+        // its beats stay in history (append-only: reversals supersede, they do
+        // not erase), and `liveness check` skips retired rows when it walks the
+        // registry. A retire for a name never registered still records the
+        // decision, so retiring before registering is not a silent no-op.
+        if (!e.name) break;
+        const cur = liveness.get(e.name) || {
+          name: e.name, every: '', grace: '',
+          registered_at: null, last_beat: null, last_proof: null,
+        };
+        cur.retired_at = e.ts;
+        cur.retired_reason = e.reason == null ? '' : String(e.reason);
         liveness.set(e.name, cur);
         break;
       }

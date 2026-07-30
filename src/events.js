@@ -288,6 +288,26 @@ function makeLivenessRegisterEvent(pebblDir, { ts, name, every, grace, actor }) 
   };
 }
 
+// liveness-retire: the job is decommissioned and should stop being watched.
+//
+// Without this, a registration is permanent: retire the job and its contract
+// keeps demanding beats that will never come, so it goes OVERDUE forever. One
+// permanent false alarm is how a monitor dies — an operator who has learned to
+// ignore a red line ignores the next one too. `reason` is required by the CLI
+// for the same purpose it is required on an audit accept: an unexplained
+// silencing is indistinguishable from giving up.
+//
+// Retiring SUPERSEDES rather than deletes, matching how everything else here
+// handles a reversal: the register and its beats stay in history, and a later
+// `liveness-register` for the same name revives it (see the fold).
+function makeLivenessRetireEvent(pebblDir, { ts, name, reason, actor }) {
+  return {
+    ...makeEnvelope(pebblDir, 'liveness-retire', { ts, actor }),
+    name: name || '',
+    reason: reason == null ? '' : String(reason),
+  };
+}
+
 function makeHeartbeatEvent(pebblDir, { ts, name, proof, actor }) {
   return {
     ...makeEnvelope(pebblDir, 'heartbeat', { ts, actor }),
@@ -531,6 +551,7 @@ module.exports = {
   makeExpireEvent,
   makeCommitEvent,
   makeLivenessRegisterEvent,
+  makeLivenessRetireEvent,
   makeHeartbeatEvent,
   repairTrailingNewline,
   appendEvent,

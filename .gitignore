@@ -1,10 +1,30 @@
 node_modules/
 *.log
-# No trailing slash: the store is sometimes a SYMLINK to a store kept outside
-# the worktree, and a `dir/` pattern matches only real directories, so `.pebbl/`
-# alone left a symlinked store showing up as untracked (one `git add -A` away
-# from committing an absolute path that means nothing on another machine).
-.pebbl
+# pebbl's own store, in SHARED mode — the same line set `pebbl init --shared`
+# writes, because pebbl should live under its own convention rather than a
+# bespoke one. events.jsonl is the single committed source of truth; everything
+# below is derived from it and rebuilds on the next read, so committing any of
+# it would store the same fact twice and hand git a binary it cannot merge.
+#
+# Files are ignored explicitly BY NAME rather than blanket-ignoring `.pebbl/`:
+# git does not descend into a blanket-ignored directory, so a `!` negation
+# inside one is inert. Keeping the directory un-ignored is what leaves
+# events.jsonl and .events-canonical tracked by default.
+#
+# events.local.jsonl is the private half of the two-file split. The fold unions
+# it in locally; git only ever carries events.jsonl. On a PUBLIC remote,
+# foundation entries route here by default — which is what makes it safe for
+# this store to live in a public repo at all.
+.pebbl/events.local.jsonl
+.pebbl/view.sqlite
+.pebbl/db.sqlite
+.pebbl/manual-logs.md
+.pebbl/handoffs.md
+.pebbl/commit-log.md
+.pebbl/narrative.md
+.pebbl/events-view.md
+.pebbl/*.lock
+.pebbl/.rebuild-needed
 .DS_Store
 # pnpm is the single source of truth (see package.json packageManager +
 # pnpm-workspace.yaml security config). Don't let `npm install` re-add its lockfile.

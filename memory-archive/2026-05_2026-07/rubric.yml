@@ -1,0 +1,50 @@
+# Pebbl classification rubric — edit to tune auto-tagging
+# Rules are evaluated top-to-bottom; first match wins.
+# Pattern is matched case-insensitively against the entry message.
+
+rules:
+  - pattern: "^\[session\]"
+    category: uncategorized
+    tier: fleeting
+
+  - pattern: "^trace:"
+    category: quality
+    tier: detail
+
+  - pattern: "parked|friction|fail(ed)? (review|verdict|adversarial)|verdict: fail|regression|hotfix|incident|crashed|post-?mortem"
+    category: steering
+    tier: detail
+
+  - pattern: "chose|decided|decision|picked|went with|trade-?off|constraint|switched|replaced|changed to|adopted|rejected|dropped|reverted|migrated"
+    category: decision
+    tier: component
+
+  - pattern: "module|component|boundary|owns|ownership|depends on|architecture"
+    category: structure
+    tier: component
+
+  - pattern: "convention|pattern|standard|always|never|rule:|style"
+    category: pattern
+    tier: component
+
+  - pattern: "schema|model|table|column|migration|data flow|storage"
+    category: data
+    tier: detail
+
+  - pattern: "api|endpoint|contract|integration|webhook|external"
+    category: integration
+    tier: detail
+
+  - pattern: "perf|latency|SLA|security|posture|target|benchmark"
+    category: quality
+    tier: detail
+
+  - pattern: "\\b(default|threshold|weight|score\\b|blend|config|param|formula)\\s*[:=]?\\s*\\d+\\.?\\d*"
+    category: decision
+    tier: fleeting
+
+
+  - pattern: "\\b(default|threshold|weight|score\\b|blend|config|param|formula)\\b.{0,20}\\d+\\.?\\d*"
+    category: decision
+    tier: detail
+

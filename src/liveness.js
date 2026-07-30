@@ -36,6 +36,7 @@ const {
   readEvents,
   appendEvent,
   makeLivenessRegisterEvent,
+  makeLivenessRetireEvent,
   makeHeartbeatEvent,
 } = require('./events');
 const { foldFull } = require('./fold');
@@ -188,9 +189,17 @@ function evaluateRegistry(rows, nowMs) {
 // comparator-broken registry computes healthy=false here, which the test asserts.
 function checkRegistry(registryRows, nowMs) {
   const base = Array.isArray(registryRows) ? registryRows.slice() : [];
+  // RETIRED contracts drop out of the walk. A decommissioned job can never beat
+  // again, so leaving it in would produce a permanently OVERDUE row — and a red
+  // line that is always red teaches the operator to stop reading the check,
+  // which costs more than the job it was watching. The row stays in the fold
+  // (retire supersedes, it does not erase), so `--json` consumers can still see
+  // that it existed and why it stopped.
+  //
   // The sentinel is always part of the walk. We strip any same-named row first
   // so a store can never shadow/override the planted sentinel with a fresh one.
-  const walked = base.filter((r) => r && r.name !== SENTINEL_NAME);
+  const live = base.filter((r) => r && !r.retired_at);
+  const walked = live.filter((r) => r && r.name !== SENTINEL_NAME);
   walked.push({ ...SENTINEL_ROW });
 
   const results = evaluateRegistry(walked, nowMs);
@@ -231,6 +240,14 @@ function checkRegistry(registryRows, nowMs) {
 function appendRegister(pebblDir, { name, every, grace }) {
   return withLock(pebblDir, () => {
     const event = makeLivenessRegisterEvent(pebblDir, { name, every, grace });
+    appendEvent(pebblDir, event);
+    return event;
+  });
+}
+
+function appendRetire(pebblDir, { name, reason }) {
+  return withLock(pebblDir, () => {
+    const event = makeLivenessRetireEvent(pebblDir, { name, reason });
     appendEvent(pebblDir, event);
     return event;
   });
@@ -293,7 +310,7 @@ function printFactoryGuide(which, asJson) {
 
 // ── CLI arg parsing (own raw-argv parse, like readback/context) ──────────────
 function parseFlags(args) {
-  const out = { json: false, factoryGuide: false, proof: null, every: null, grace: null, positionals: [] };
+  const out = { json: false, factoryGuide: false, proof: null, every: null, grace: null, reason: null, positionals: [] };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === '--json') { out.json = true; continue; }
@@ -304,6 +321,8 @@ function parseFlags(args) {
     if (a.startsWith('--every=')) { out.every = a.slice('--every='.length); continue; }
     if (a === '--grace') { const v = args[i + 1]; if (v !== undefined && !v.startsWith('--')) { out.grace = v; i++; } continue; }
     if (a.startsWith('--grace=')) { out.grace = a.slice('--grace='.length); continue; }
+    if (a === '--reason') { const v = args[i + 1]; if (v !== undefined && !v.startsWith('--')) { out.reason = v; i++; } continue; }
+    if (a.startsWith('--reason=')) { out.reason = a.slice('--reason='.length); continue; }
     if (a.startsWith('--')) continue;              // ignore unknown flags
     out.positionals.push(a);
   }
@@ -403,6 +422,45 @@ function registerCmd(args) {
   }
 }
 
+// `pebbl liveness retire <name> --reason "..."`
+//
+// Stop watching a decommissioned job. A `--reason` is required for the same
+// reason an audit accept requires one: this silences an alarm, and a silencing
+// nobody wrote down is indistinguishable from an alarm that was ignored. The
+// row stays in the fold, so `check --json` can still show it was retired and
+// why; re-registering the name revives it.
+function retireCmd(args) {
+  const opts = parseFlags(args);
+  const name = opts.positionals[0];
+  if (!name) {
+    console.error('Usage: pebbl liveness retire <name> --reason "why it no longer runs"');
+    process.exit(1);
+  }
+  const reason = typeof opts.reason === 'string' ? opts.reason.trim() : '';
+  if (!reason) {
+    console.error('pebbl liveness retire: --reason "why it no longer runs" is required.');
+    console.error('Retiring silences a check forever; an unexplained silence reads the same');
+    console.error('as an alarm everyone learned to ignore. Say what replaced it, or that');
+    console.error('the job is gone.');
+    process.exit(1);
+  }
+  const pebblDir = requirePebblDir();
+  const registry = loadRegistry(pebblDir);
+  if (!registry.some((r) => r && r.name === name)) {
+    // Not fatal — retiring something that was never registered is a harmless
+    // no-op decision — but say so, because the usual cause is a typo, and a
+    // silent success would leave the REAL job still alarming.
+    console.error(`pebbl liveness retire: warning — no registered job named '${name}'.`);
+    console.error(`Registered: ${registry.map((r) => r.name).join(', ') || '(none)'}`);
+  }
+  const event = appendRetire(pebblDir, { name, reason });
+  if (opts.json) {
+    process.stdout.write(JSON.stringify({ ok: true, name, reason, eid: event.eid }) + '\n');
+  } else {
+    process.stdout.write(`retired: ${name} — ${reason}\n`);
+  }
+}
+
 // `pebbl liveness check [--json]` — the self-proving walk.
 //
 // Order matters: (1) beat our OWN liveness-check heartbeat and assert it is
@@ -463,9 +521,11 @@ function livenessCmd(args) {
   // `pebbl liveness --factory-guide` (no subcommand) describes the liveness command.
   if (sub === '--factory-guide') { const o = parseFlags(args); printFactoryGuide('liveness', o.json); return; }
   if (sub === 'register') { registerCmd(rest); return; }
+  if (sub === 'retire') { retireCmd(rest); return; }
   if (sub === 'check') { checkCmd(rest); return; }
   console.error('Usage: pebbl liveness register <name> --every <dur> [--grace <dur>]');
   console.error('       pebbl liveness check [--json]');
+  console.error('       pebbl liveness retire <name> --reason "why it no longer runs"');
   console.error('       pebbl liveness --factory-guide [--json]');
   process.exit(1);
 }
@@ -475,7 +535,7 @@ module.exports = { liveness: livenessCmd, heartbeat: heartbeatCmd };
 // Internal surface for tests (pure pieces + constants), mirroring readback._internal.
 module.exports._internal = {
   parseDuration, evaluateRegistry, checkRegistry,
-  appendRegister, appendHeartbeat, loadRegistry,
+  appendRegister, appendRetire, appendHeartbeat, loadRegistry,
   FACTORY_GUIDE, SENTINEL_NAME, SENTINEL_ROW,
   SELF_CHECK_NAME, SELF_CHECK_EVERY, SELF_CHECK_GRACE, SELF_FRESH_MS,
 };

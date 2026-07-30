@@ -352,3 +352,65 @@ describe('liveness CLI — register / heartbeat / check end to end', () => {
     assert.match(b.stdout, /LIVENESS signal/i);
   });
 });
+
+// ── retire: a decommissioned job must stop demanding beats ───────────────────
+// Without retire a registration is permanent, so a job that will never run
+// again sits OVERDUE forever. One immortal red line is how an operator learns
+// to ignore the whole check, which costs more than the job it watched.
+describe('liveness — retire', () => {
+  const { _internal } = require('../src/liveness');
+  const { checkRegistry } = _internal;
+  const { foldFull } = require('../src/fold');
+
+  const NOW = Date.parse('2026-07-30T12:00:00.000Z');
+  const OLD = '2026-01-01T00:00:00.000Z';
+
+  it('drops a retired job out of the walk', () => {
+    const rows = [
+      { name: 'gone', every: '24h', grace: '1h', registered_at: OLD, last_beat: null, retired_at: OLD },
+    ];
+    const { results } = checkRegistry(rows, NOW);
+    assert.equal(results.some((r) => r.name === 'gone'), false);
+  });
+
+  it('an UNretired job with the same shape IS still overdue (the check still bites)', () => {
+    const rows = [
+      { name: 'gone', every: '24h', grace: '1h', registered_at: OLD, last_beat: null },
+    ];
+    const { results } = checkRegistry(rows, NOW);
+    const row = results.find((r) => r.name === 'gone');
+    assert.ok(row && row.overdue, 'a live never-beat job must still report overdue');
+  });
+
+  it('folds liveness-retire onto the row without erasing its history', () => {
+    const events = [
+      { eid: '1', ts: OLD, type: 'liveness-register', name: 'j', every: '24h', grace: '1h' },
+      { eid: '2', ts: '2026-02-01T00:00:00.000Z', type: 'heartbeat', name: 'j', proof: 'p1' },
+      { eid: '3', ts: '2026-03-01T00:00:00.000Z', type: 'liveness-retire', name: 'j', reason: 'replaced' },
+    ];
+    const row = (foldFull(events).liveness || []).find((r) => r.name === 'j');
+    assert.ok(row, 'the row must survive retirement — retire supersedes, it does not erase');
+    assert.equal(row.retired_reason, 'replaced');
+    assert.equal(row.last_beat, '2026-02-01T00:00:00.000Z', 'the beat history must remain readable');
+  });
+
+  it('re-registering REVIVES a retired job', () => {
+    const events = [
+      { eid: '1', ts: OLD, type: 'liveness-register', name: 'j', every: '24h', grace: '1h' },
+      { eid: '2', ts: '2026-03-01T00:00:00.000Z', type: 'liveness-retire', name: 'j', reason: 'paused' },
+      { eid: '3', ts: '2026-04-01T00:00:00.000Z', type: 'liveness-register', name: 'j', every: '24h', grace: '1h' },
+    ];
+    const row = (foldFull(events).liveness || []).find((r) => r.name === 'j');
+    assert.equal(row.retired_at, null, 'registering again must clear the retirement');
+    const { results } = checkRegistry([row], NOW);
+    assert.ok(results.find((r) => r.name === 'j'), 'a revived job is walked again');
+  });
+
+  it('a stream with NO retire event folds exactly as before', () => {
+    const events = [
+      { eid: '1', ts: OLD, type: 'liveness-register', name: 'j', every: '24h', grace: '1h' },
+    ];
+    const row = (foldFull(events).liveness || []).find((r) => r.name === 'j');
+    assert.ok(!row.retired_at, 'no retire event means no retirement');
+  });
+});
