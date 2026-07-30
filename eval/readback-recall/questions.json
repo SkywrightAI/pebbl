@@ -1,0 +1,78 @@
+{
+  "name": "readback-recall",
+  "purpose": "Baseline recall for `pebbl readback`, the read-first collision check loom depends on. Collision PRECISION is already measured elsewhere (loom's self-fix lane: 100% collision rate on 34 findings, RARE_NIDF_FLOOR admits the whole domain vocabulary). RECALL has no baseline, and recall is exactly what a node/edge graph is supposed to improve — so it is what this measures.",
+  "design": "Two tiers over the SAME expected precedents. Tier A phrases the ask the way a self-fix spec usually does, naming the file or symbol. Tier B describes the identical defect in a builder's own words with the artifact names and distinctive identifiers REMOVED. Today's readback matches text, so Tier A is the control (if it fails, the harness is broken, not readback) and Tier B is the hypothesis: it is the case an `entry -touches-> file` edge would answer and token matching cannot.",
+  "scoring": "For each question, computeReadback(store, question, {top: 10}). A hit is the expected eid appearing in the returned array. Reported per tier: recall@1, recall@5, and MRR. Rank is 1-based position in the result array.",
+  "questions": [
+    {
+      "id": "A1",
+      "tier": "artifact-named",
+      "expect": "01KW14RKP5ZZTY2G5N3DJJN76B",
+      "query": "src/capabilities/queue.ts addTask writes queue.jsonl lines; make the append newline-safe so two JSON objects cannot end up glued on one line",
+      "about": "queue.jsonl silent corruption — addTask appends a trailing newline only, so a file whose last line lacks one glues two objects and the reader silently skips both"
+    },
+    {
+      "id": "A2",
+      "tier": "artifact-named",
+      "expect": "01KW1AJ0RERBQCRPES5YB3XDTT",
+      "query": "src/lifecycle/pipeline.ts firstProtected should scan the build diff instead of walking the whole workdir",
+      "about": "protected-path deadlock — firstProtected runs protectedViolations over every file in the workdir, so loom guard-blocks review of its own code on files the change never touched"
+    },
+    {
+      "id": "A3",
+      "tier": "artifact-named",
+      "expect": "01KW1A3P7E3NXRWMNMXQ8ZFN7Z",
+      "query": "src/foundation/config.ts should resolve the cross-family judge key from the loom secrets file, not only from the ZAI_API_KEY environment variable",
+      "about": "GLM key footgun — the key lives in loom's user-level secrets file, which loom never auto-loads, so sessions silently fall back to ProbeJudge"
+    },
+    {
+      "id": "A4",
+      "tier": "artifact-named",
+      "expect": "01KVXNJVEG20XBKKAX9S4AHX4N",
+      "query": "src/orchestration/maintenance.ts: the maintain-cursor watermark must fail closed and quarantine when the cursor file is corrupt",
+      "about": "maintenance plane cross-tick fixes — watermark cursor so ENCODE writes once per run, corrupt cursor throws and quarantines"
+    },
+    {
+      "id": "A5",
+      "tier": "artifact-named",
+      "expect": "01KVXPPQ5FZKRHM7SH8TBJMK7N",
+      "query": "sign the probe with an HMAC across the kernel boundary so the Deno side cannot accept a forged probe",
+      "about": "F1 probe signing — the probe is un-forgeable in-process but is JSON across the kernel/Deno hop"
+    },
+    {
+      "id": "B1",
+      "tier": "reworded",
+      "expect": "01KW14RKP5ZZTY2G5N3DJJN76B",
+      "query": "our pending-work file sometimes loses entries: two records end up merged onto a single line and the loader quietly discards both instead of reporting anything",
+      "about": "same defect as A1, with queue.jsonl / addTask / queue.ts removed"
+    },
+    {
+      "id": "B2",
+      "tier": "reworded",
+      "expect": "01KW1AJ0RERBQCRPES5YB3XDTT",
+      "query": "the safety check that blocks edits to sensitive files inspects every file present in the working copy rather than only what actually changed, so it refuses work that never touched them",
+      "about": "same defect as A2, with pipeline.ts / firstProtected / protectedViolations removed"
+    },
+    {
+      "id": "B3",
+      "tier": "reworded",
+      "expect": "01KW1A3P7E3NXRWMNMXQ8ZFN7Z",
+      "query": "when the reviewer credential is absent we quietly downgrade to a weaker automated check, and the recorded output still reads as though a real second opinion happened",
+      "about": "same defect as A3, with config.ts / ZAI_API_KEY / GLM / the secrets-file name removed"
+    },
+    {
+      "id": "B4",
+      "tier": "reworded",
+      "expect": "01KW26263PASCA5W94DMSPWNVF",
+      "query": "the independent second-opinion model rejected a change for reasons that turned out to be invented, and we treated that rejection as authoritative",
+      "about": "false-positive reviewer — GLM failed a correct tested change on a hallucinated premise; 'GLM', 'reviewer' and the task id removed"
+    },
+    {
+      "id": "B5",
+      "tier": "reworded",
+      "expect": "01KVXFY2BZ2EJRAEKESRZ30Z2Z",
+      "query": "someone can skip our local checks entirely when committing, so the same checks have to run somewhere they cannot be bypassed",
+      "about": "unskippable gate backstop — pre-commit is --no-verify-bypassable so the gate also runs at promote and in CI; those terms removed"
+    }
+  ]
+}
