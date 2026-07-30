@@ -320,3 +320,66 @@ describe('privacy-scan --staged — the ledger can commit itself', () => {
     );
   });
 });
+
+describe('privacy-scan --staged — one ledger, two producers of findings', () => {
+  function stagedRepo(files) {
+    const repo = tmpRepo();
+    sh(repo, 'git init -q && git config user.email t@t && git config user.name t');
+    fs.writeFileSync(path.join(repo, 'seed.txt'), 'seed\n');
+    sh(repo, 'git add -A && git commit -qm seed');
+    for (const [rel, body] of Object.entries(files)) {
+      fs.mkdirSync(path.dirname(path.join(repo, rel)), { recursive: true });
+      fs.writeFileSync(path.join(repo, rel), body);
+    }
+    sh(repo, 'git add -A');
+    return repo;
+  }
+  // A machine-written append-only log can legitimately RECORD a credential path,
+  // and cannot be hand-edited to carry a line marker. Without a ledger the only
+  // escape is PEBBL_SKIP_SCAN, which disables the scan for the whole commit.
+  const LOGLINE = '{"type":"append","message":"loom reads secrets from /.config/loom/secrets.env"}\n'; // allowlist-secret: fixture path, not a credential
+
+  it('blocks a staged credential path before any decision is recorded', () => {
+    assert.throws(
+      () => run(stagedRepo({ '.pebbl/events.jsonl': LOGLINE }), ['privacy-scan', '--staged']),
+      (e) => /BLOCKED/.test(String(e.stderr)),
+    );
+  });
+
+  it('--accept all --reason records it and the same content then passes', () => {
+    const repo = stagedRepo({ '.pebbl/events.jsonl': LOGLINE });
+    const out = run(repo, ['privacy-scan', '--staged', '--accept', 'all', '--reason', 'a credential PATH is not a credential']);
+    assert.match(out, /accepted [0-9a-f]{12}/);
+    run(repo, ['privacy-scan', '--staged']);   // throws on non-zero exit
+    assert.ok(fs.existsSync(path.join(repo, LEDGER_FILENAME)));
+  });
+
+  it('refuses --accept without --reason', () => {
+    assert.throws(
+      () => run(stagedRepo({ '.pebbl/events.jsonl': LOGLINE }), ['privacy-scan', '--staged', '--accept', 'all']),
+      (e) => /requires --reason/.test(String(e.stderr)),
+    );
+  });
+
+  it('an accept is scoped to that file — the same string elsewhere still blocks', () => {
+    const repo = stagedRepo({ '.pebbl/events.jsonl': LOGLINE });
+    run(repo, ['privacy-scan', '--staged', '--accept', 'all', '--reason', 'path not credential']);
+    fs.writeFileSync(path.join(repo, 'notes.md'), 'source /.config/loom/secrets.env\n'); // allowlist-secret: fixture path, not a credential
+    sh(repo, 'git add -A');
+    assert.throws(
+      () => run(repo, ['privacy-scan', '--staged']),
+      (e) => /BLOCKED/.test(String(e.stderr)) && /notes\.md/.test(String(e.stderr)),
+    );
+  });
+
+  it('a NEW leak class in the accepted file still blocks', () => {
+    const repo = stagedRepo({ '.pebbl/events.jsonl': LOGLINE });
+    run(repo, ['privacy-scan', '--staged', '--accept', 'all', '--reason', 'path not credential']);
+    fs.appendFileSync(path.join(repo, '.pebbl/events.jsonl'), '{"message":"host 198.18.0.9:443"}\n'); // allowlist-secret: fixture path, not a credential
+    sh(repo, 'git add -A');
+    assert.throws(
+      () => run(repo, ['privacy-scan', '--staged']),
+      (e) => /BLOCKED/.test(String(e.stderr)) && /198\.18\.0\.9/.test(String(e.stderr)),
+    );
+  });
+});

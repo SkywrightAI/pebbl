@@ -674,11 +674,79 @@ function cli(args) {
     const flat = [];
     for (const f of stagedAddedByFile(repoRoot)) {
       for (const h of scanStagedFile(f, scanOpts)) {
-        flat.push({ ...h, detail: `${h.detail} in ${f.path}` });
+        flat.push({ ...h, file: f.path, detail: `${h.detail} in ${f.path}` });
       }
     }
-    if (flat.length) {
-      printHits('the staged diff', flat);
+
+    // The staged gate goes through the SAME accept ledger as the push gate.
+    //
+    // Without this it has no accept path at all, and that is worse here than it
+    // was for history: a machine-written store file (`.pebbl/events.jsonl`) can
+    // legitimately RECORD a credential path — "loom reads secrets from
+    // ~/.config/loom/secrets.env" is a fact worth remembering, not a leak — and (allowlist-secret: illustrative path in a comment)
+    // an append-only log cannot be hand-edited to carry a line marker. So the
+    // only escape was PEBBL_SKIP_SCAN, which disables the whole scan for the
+    // whole commit. One ledger, two producers of findings.
+    const { loadLedger, saveLedger, partition, groupByFingerprint, toEntry, resolveId } = require('./audit-ledger');
+    const ledger = loadLedger(repoRoot);
+    if (ledger.error) {
+      console.error(`\npebbl privacy-scan: the accept ledger at ${ledger.path} is unreadable (${ledger.error}).`);
+      console.error('Failing closed — every finding counts as unaccepted until it is fixed.');
+    }
+    const { blocking } = partition(flat, ledger.accepted);
+
+    const acceptIdx = argv.findIndex((a) => a === '--accept' || a.startsWith('--accept='));
+    if (acceptIdx !== -1) {
+      if (ledger.error) {
+        console.error('pebbl privacy-scan: refusing to edit an unreadable ledger.');
+        process.exit(1);
+      }
+      const inline = argv[acceptIdx].startsWith('--accept=') ? argv[acceptIdx].slice('--accept='.length) : null;
+      const target = inline || argv[acceptIdx + 1];
+      const rIdx = argv.findIndex((a) => a === '--reason' || a.startsWith('--reason='));
+      const reasonRaw = rIdx === -1
+        ? ''
+        : (argv[rIdx].startsWith('--reason=') ? argv[rIdx].slice('--reason='.length) : argv[rIdx + 1]);
+      const reason = (reasonRaw || '').trim();
+      if (!target) {
+        console.error('Usage: pebbl privacy-scan --staged --accept <id|all> --reason "..."');
+        process.exit(1);
+      }
+      if (!reason) {
+        console.error('pebbl privacy-scan: --accept requires --reason "why this is safe to accept".');
+        console.error('An accept is a security decision that outlives the session; an unexplained');
+        console.error('one is PEBBL_SKIP_SCAN with extra steps.');
+        process.exit(1);
+      }
+      const groups = groupByFingerprint(blocking);
+      if (groups.length === 0) {
+        console.log('pebbl privacy-scan: nothing to accept — no unaccepted findings staged.');
+        process.exit(0);
+      }
+      let targets;
+      if (target === 'all') {
+        targets = groups;
+      } else {
+        const { id, error } = resolveId(target, groups.map((g) => g.id));
+        if (error) { console.error(`pebbl privacy-scan: ${error}`); process.exit(1); }
+        targets = [groups.find((g) => g.id === id)];
+      }
+      const now = new Date().toISOString();
+      for (const g of targets) {
+        ledger.accepted.set(g.id, toEntry(g, reason, now));
+        console.log(`accepted ${g.id}  [${g.class}]  ${g.class === 'token' ? '(value withheld)' : g.match}  in ${g.file}`);
+      }
+      saveLedger(repoRoot, ledger.accepted);
+      console.log(`\nLedger written: ${ledger.path}  (stage and commit it alongside.)`);
+      process.exit(0);
+    }
+
+    if (blocking.length) {
+      printHits('the staged diff', blocking);
+      console.error('\nIf a finding is a deliberate, non-secret fact (a credential PATH is not a');
+      console.error('credential), record the decision instead of skipping the scan:');
+      console.error('  pebbl privacy-scan --staged --accept all --reason "..."');
+      console.error('For a hand-written line, `allowlist-secret` on that line is the narrower fix.');
       process.exit(1);
     }
     process.exit(0);
