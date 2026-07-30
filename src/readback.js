@@ -21,7 +21,7 @@ const fs = require('fs');
 const Database = require('better-sqlite3');
 const { requirePebblDir } = require('./find-pebbl');
 const { readEvents } = require('./events');
-const { fold } = require('./fold');
+const { fold, isRollupMessage } = require('./fold');
 const { buildFtsIndex, FTS_TABLE, fts5Compiled } = require('./db');
 const { rankCandidates } = require('./rank');
 // Reuse search.js's ONE query builder (and, transitively, its ONE tokenizer
@@ -70,7 +70,25 @@ function isReasoningRow(row) {
 // real prior decision — we keep them as candidates; the agent judges currency).
 function loadReasoningRows(pebblDir) {
   const rows = fold(readEvents(pebblDir));
-  return rows.filter(isReasoningRow);
+  // EXCLUDE compaction rollups. readback's contract is "resume or supersede this
+  // prior work, do not rebuild it" — but a rollup is the compactor's own output,
+  // joining many unrelated facts into one row. There is nothing in it a builder
+  // can resume and nothing they can supersede, so it can never satisfy that
+  // contract.
+  //
+  // Measured (eval/readback-recall/BASELINE.md): on a 261-row snapshot of loom's
+  // store, rollups were 5 rows (1.9%) running 25k-185k characters against a
+  // 1034-char median, and they took rank 1 on 8 of 10 eval queries. Worse than
+  // crowding — because a rollup accumulates a quarter of text it ends up naming
+  // EVERY file in the corpus, so it trips the artifact path and comes back
+  // flagged `collision: true`, telling the caller "prior work exists, do not
+  // rebuild" on the strength of a storage artifact. Excluding them lifted
+  // artifact-named recall@1 from 0.20 to 1.00 on a corpus three times larger.
+  //
+  // This narrows what readback offers as a PRECEDENT. It hides nothing: rollups
+  // stay in the fold, so `pebbl search`, `pebbl context` and the markdown
+  // projections are untouched.
+  return rows.filter((r) => isReasoningRow(r) && !isRollupMessage(r.message));
 }
 
 // ── identifier-aware extraction (F2 fix) ─────────────────────────────────────

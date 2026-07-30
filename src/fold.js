@@ -52,6 +52,20 @@ function topicsToString(topics) {
   return topics == null ? '' : String(topics);
 }
 
+// THE one definition of "this row is a compaction rollup". compact.js WRITES the
+// `[rollup] ` prefix (generateRollupMessage) and strips it when re-rolling;
+// rubric.js exempts rollups from the atomicity gate; readback.js refuses to offer
+// them as precedents. rubric's comment already claimed "there is one definition
+// of 'this row is a rollup'" while testing the prefix inline — this makes that
+// literally true, so the three readers cannot drift from the writer.
+//
+// The prefix is a machine marker no honest write path uses, so prefix-matching is
+// the intended test rather than a heuristic. Total by design: a null, undefined
+// or non-string message is simply not a rollup, never a throw.
+function isRollupMessage(message) {
+  return typeof message === 'string' && /^\[rollup\]/i.test(message);
+}
+
 // The closed event set P1 folds. Anything else is ignored (Acceptance #1:
 // "unknown types are ignored, not thrown").
 const KNOWN_TYPES = new Set([
@@ -450,5 +464,6 @@ module.exports = {
   foldFull,
   compareEvents,
   topicsToString,
+  isRollupMessage,
   KNOWN_TYPES,
 };

@@ -1,6 +1,7 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
+const { isRollupMessage } = require('./fold');
 
 function parseYaml(content) {
   const lines = content.split('\n');
@@ -216,8 +217,10 @@ function atomicityOf(rules, message) {
   if (m.category === 'uncategorized' || m.tier === 'fleeting') {
     return { categories, nonAtomic: false, reason: null };
   }
-  // Compaction rollups are multi-fact by construction — never flag them.
-  if (/^\[rollup\]/i.test(String(message || ''))) {
+  // Compaction rollups are multi-fact by construction — never flag them. The
+  // predicate is shared with readback (fold.isRollupMessage) so the writer and
+  // every reader agree on what a rollup is.
+  if (isRollupMessage(message)) {
     return { categories, nonAtomic: false, reason: null };
   }
   const len = String(message || '').length;

@@ -1,5 +1,23 @@
 # readback recall — frozen baseline
 
+> **Superseded for the artifact-named tier by the rollup fix.** Rollup rows are
+> now excluded from readback's precedent set. Re-scored on the *identical*
+> snapshot at `--top 50`:
+>
+> | tier | recall@1 | recall@5 | MRR |
+> |---|---|---|---|
+> | artifact-named | 0.20 → **1.00** | 1.00 → 1.00 | 0.533 → **1.000** |
+> | reworded | 0.00 → 0.00 | 0.00 → **0.20** | 0.054 → 0.095 |
+>
+> Every artifact-named query now returns its exact target at rank 1. The reworded
+> tier improved only marginally (ranks 44→37, 9→5, 17→12, 11→6, one still never
+> found), which is the point: **rollups were the whole artifact-named problem and
+> almost none of the reworded one.** Reworded recall@5 = 0.20 is the number R1/R2
+> now has to beat.
+>
+> Everything below is the original pre-fix measurement, kept as the record.
+
+
 Measured 2026-07-30 against a snapshot of `~/loom/.pebbl` taken immediately after
 R4 landed (so the duplicate-heavy pre-R4 corpus can't flatter a later
 comparison). Corpus: **261 rows** (257 reasoning).
