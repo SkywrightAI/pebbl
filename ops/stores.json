@@ -14,7 +14,8 @@
     "lib-git-auth.sh). Omit it to use whatever gh account is active.",
     "",
     "Not here yet, and why:",
-    "  lumr           .pebbl/* is ignored except handoffs.md — needs the shared-mode switch",
+    "  (lumr joined 2026-07-30 after migrate-to-events; it needed migrating BEFORE the",
+    "   gitignore switch, or un-ignoring a partial log would have dropped 191 entries)",
     "  harold         same, plus its store is 20 entries",
     "  security       same, 3 entries",
     "  frontend-loop  tracked already, but the repo has NO remote",
@@ -30,6 +31,11 @@
     {
       "name": "loom",
       "path": "/Users/ashley/loom",
+      "pushUser": "newpathai"
+    },
+    {
+      "name": "lumr",
+      "path": "/Users/ashley/Documents/10.Code-Projects/lumr",
       "pushUser": "newpathai"
     }
   ]

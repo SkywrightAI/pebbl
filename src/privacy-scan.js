@@ -491,17 +491,56 @@ function probeGitHubVisibility(slug, execGit) {
   // Test / offline override: PEBBL_GH_VISIBILITY=public|private short-circuits.
   const o = process.env.PEBBL_GH_VISIBILITY;
   if (o === 'public' || o === 'private') return o;
+
+  const { execFileSync } = require('child_process');
+  const ask = (env) => {
+    try {
+      const out = execFileSync('gh', ['repo', 'view', `${slug.owner}/${slug.repo}`, '--json', 'visibility', '-q', '.visibility'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 5000,
+        env: env ? { ...process.env, ...env } : process.env,
+      }).trim().toLowerCase();
+      if (out === 'public') return 'public';
+      if (out === 'private' || out === 'internal') return 'private';
+    } catch {
+      // gh missing / unauthenticated / no access / network — caller decides
+    }
+    return 'unknown';
+  };
+
+  const active = ask(null);
+  if (active !== 'unknown') return active;
+
+  // The ACTIVE gh account may simply have no grant on this repo — GitHub answers
+  // 404 rather than 403 for a repo a token cannot see, which is indistinguishable
+  // from "does not exist". Left there, a PRIVATE repo reads as unprobed, the
+  // caller fails closed to 'public', and the strictest gate fires on a repo that
+  // was never published. That is not a safe default so much as a wrong answer
+  // wearing one.
+  //
+  // So ask the OTHER authenticated accounts too. The question is "can any
+  // credential I hold see this repo, and what does it say" — a repo one of your
+  // own accounts reads as private IS private. Only runs on the unknown path, so
+  // the common case still costs a single probe.
   try {
-    const { execFileSync } = require('child_process');
-    const out = execFileSync('gh', ['repo', 'view', `${slug.owner}/${slug.repo}`, '--json', 'visibility', '-q', '.visibility'], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: 5000,
-    }).trim().toLowerCase();
-    if (out === 'public') return 'public';
-    if (out === 'private' || out === 'internal') return 'private';
+    const status = execFileSync('gh', ['auth', 'status'], {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000,
+    });
+    const users = Array.from(status.matchAll(/Logged in to \S+ account (\S+)/g)).map((m) => m[1]);
+    for (const u of users) {
+      let token = '';
+      try {
+        token = execFileSync('gh', ['auth', 'token', '--user', u], {
+          encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000,
+        }).trim();
+      } catch { continue; }
+      if (!token) continue;
+      const v = ask({ GH_TOKEN: token });
+      if (v !== 'unknown') return v;
+    }
   } catch {
-    // gh missing / unauthenticated / network — fall through to unknown
+    // no gh / cannot enumerate accounts — fall through to unknown
   }
   return 'unknown';
 }

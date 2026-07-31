@@ -1,5 +1,5 @@
 'use strict';
-const { describe, it } = require('node:test');
+const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
@@ -345,5 +345,38 @@ describe('privacy-scan — RFC5737 documentation IPs are not leaks', () => {
 
   it('the real droplet address is unaffected by the exemption', () => {
     assert.equal(scan('droplet 67.207.93.196:48422').length, 1); // allowlist-secret: reserved-range fixture, not real infrastructure
+  });
+});
+
+// A repo one of your OWN accounts can read as private IS private. GitHub answers
+// 404 (not 403) for a repo a token has no grant on, so probing with only the
+// ACTIVE account made a private repo look unprobed — and the caller fails closed
+// to 'public', firing the strictest gate on something never published.
+describe('privacy-scan — visibility probe across authenticated accounts', () => {
+  const REAL = process.env.PEBBL_GH_VISIBILITY;
+  afterEach(() => {
+    if (REAL === undefined) delete process.env.PEBBL_GH_VISIBILITY;
+    else process.env.PEBBL_GH_VISIBILITY = REAL;
+  });
+
+  it('honours the explicit override without shelling out', () => {
+    process.env.PEBBL_GH_VISIBILITY = 'private';
+    const v = detectRemoteVisibility(() => 'origin\thttps://github.com/acme/x.git (fetch)\n');
+    assert.equal(v.visibility, 'private');
+  });
+
+  it('a probed PRIVATE repo is reported private, not assumed public', () => {
+    process.env.PEBBL_GH_VISIBILITY = 'private';
+    const v = detectRemoteVisibility(() => 'origin\thttps://github.com/acme/secret.git (fetch)\n');
+    assert.equal(v.visibility, 'private');
+    assert.match(v.reason, /probed/);
+  });
+
+  it('still fails closed to public when nothing can resolve it', () => {
+    delete process.env.PEBBL_GH_VISIBILITY;
+    // A github URL whose owner/repo cannot be probed by any account: the safe
+    // direction is still 'public', because over-blocking beats leaking.
+    const v = detectRemoteVisibility(() => 'origin\thttps://github.com/acme/definitely-not-a-real-repo-xyz123.git (fetch)\n');
+    assert.equal(v.visibility, 'public');
   });
 });
