@@ -1,11 +1,13 @@
 # ops — keeping pebbl's own memory alive
 
-pebbl uses itself. Its store is `../.pebbl/`, and these three scripts are what
-stop that store from existing only on one laptop.
+pebbl uses itself. Its store is `../.pebbl/`, and these scripts are what stop
+that store — and every other pebbl store on this machine — from existing only on
+one laptop.
 
 | Script | What it does |
 |---|---|
-| `commit-memory.sh` | Commits and pushes new memory once a day (launchd `com.ashley.pebbl-memory`, 22:00). Runs the privacy scan first and refuses to commit unscanned memory if the scan cannot run. Log: `.git/memory-commit.log`. |
+| `stores.json` | The list of stores the job walks. Adding a store is a line here, not a copy of the script. |
+| `commit-memory.sh` | Commits and pushes new memory once a day for EVERY store in that list (launchd `com.ashley.pebbl-memory`, 22:00). Runs the privacy scan per store and refuses to commit unscanned memory if the scan cannot run. Log: `.git/memory-commit.log`. |
 | `check-memory-health.sh` | Verifies — and repairs — the eight invariants the pipeline depends on. |
 | `test-memory-health.sh` | Breaks each invariant on purpose and asserts the check catches it. |
 | `lib-git-auth.sh` | Resolves the gh account that can actually push to this org repo. |
@@ -29,6 +31,12 @@ beats a liveness heartbeat, and only after the invariant checks pass.**
 `loom maintain` walks that registry every four hours and escalates whatever is
 OVERDUE. No beat for 24h + 12h grace and it gets raised.
 
+Every store beats its OWN heartbeat (`memory-pebbl`, `memory-loom`, …). A single
+shared beat would read green as long as ANY store committed, which hides exactly
+the failure worth catching: one repo silently dropping out while the others carry
+the signal. A store with no remote is committed but never beaten — a green beat
+for memory that never left the laptop is the lie the heartbeat exists to prevent.
+
 | Silent failure | Caught by |
 |---|---|
 | launchd job unloaded or never fires | no heartbeat → OVERDUE |
@@ -39,6 +47,8 @@ OVERDUE. No beat for 24h + 12h grace and it gets raised.
 | repo moved under `~/Documents` (TCC) | `repo-location` probe |
 | commits piling up unpushed | `unpushed` drift probe |
 | store silently reads EMPTY (amnesia) | `store-mode` probe |
+| ONE store drops out while others keep committing | its own `memory-<name>` beat goes OVERDUE |
+| a store is committed but never pushed | no beat for that store (the job refuses to beat without a push) |
 
 Three properties that matter more than the list:
 
