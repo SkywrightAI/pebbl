@@ -18,9 +18,6 @@
     "only consulted for an HTTPS remote.",
     "",
     "Not here yet, and why:",
-    "  frontend-loop  store cleaned up and versioned, but the repo has NO remote and",
-    "                 the current PAT cannot create one (needs org Administration",
-    "                 write). Create SkywrightAI/frontend-loop and it can join.",
     "  (lumr joined 2026-07-30 after migrate-to-events; it needed migrating BEFORE the",
     "   gitignore switch, or un-ignoring a partial log would have dropped 191 entries)",
     "  lawyer-tool-rs 85 entries, no remote, and its memory concerns real contracts —",
@@ -50,6 +47,10 @@
     {
       "name": "security",
       "path": "/Users/ashley/Documents/10.Code-Projects/security"
+    },
+    {
+      "name": "frontend-loop",
+      "path": "/Users/ashley/Documents/10.Code-Projects/frontend-loop"
     }
   ]
 }
