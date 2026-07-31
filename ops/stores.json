@@ -14,10 +14,11 @@
     "lib-git-auth.sh). Omit it to use whatever gh account is active.",
     "",
     "Not here yet, and why:",
+    "  security       migrated and versioned, but main is a PROTECTED branch — an",
+    "                 automated daily push cannot land without a bypass or a dedicated",
+    "                 branch. PR #3 is open; decide the mechanism before adding it.",
     "  (lumr joined 2026-07-30 after migrate-to-events; it needed migrating BEFORE the",
     "   gitignore switch, or un-ignoring a partial log would have dropped 191 entries)",
-    "  harold         same, plus its store is 20 entries",
-    "  security       same, 3 entries",
     "  frontend-loop  tracked already, but the repo has NO remote",
     "  lawyer-tool-rs 85 entries, no remote, and its memory concerns real contracts —",
     "                 the privacy posture is a decision to make before a transport"
@@ -36,6 +37,11 @@
     {
       "name": "lumr",
       "path": "/Users/ashley/Documents/10.Code-Projects/lumr",
+      "pushUser": "newpathai"
+    },
+    {
+      "name": "harold",
+      "path": "/Users/ashley/Documents/10.Code-Projects/harold",
       "pushUser": "newpathai"
     }
   ]

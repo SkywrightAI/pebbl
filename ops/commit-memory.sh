@@ -126,10 +126,19 @@ commit_store() {
     fi
     local n
     n=$(git -C "$path" diff --cached --numstat | awk '{a+=$1; d+=$2} END {print a+0"+/"d+0"-"}')
-    if git -C "$path" commit -q -m "memory: $name decisions through $(date '+%Y-%m-%d') ($n)"; then
+    # Capture the commit's own output. A repo can have a heavyweight pre-commit
+    # gate (loom runs fmt + lint + its whole test suite), and when one of those
+    # fails the reason is the only thing that makes the failure actionable.
+    # Discarding it left "FATAL commit failed" with no cause — the precise shape
+    # of silent failure this pipeline exists to eliminate, reproduced inside the
+    # pipeline itself.
+    local cout
+    cout=$( { git -C "$path" commit -q -m "memory: $name decisions through $(date '+%Y-%m-%d') ($n)"; } 2>&1 )
+    if [ $? -eq 0 ]; then
       say "  committed $n"
     else
-      say "  FATAL commit failed"
+      say "  FATAL commit failed — output follows"
+      printf '%s\n' "$cout" | tail -40 >> "$LOG"
       return 1
     fi
   else
