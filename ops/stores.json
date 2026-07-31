@@ -18,12 +18,6 @@
     "only consulted for an HTTPS remote.",
     "",
     "Not here yet, and why:",
-    "  security       migrated and landed on main, but main is a PROTECTED branch and",
-    "                 the protection is real: a push whose commits ARE an open PR is",
-    "                 accepted (it counts as the PR merging), a genuinely new commit",
-    "                 is not. SSH did not change this — protection is server-side and",
-    "                 transport-blind. Add AshleyxAdamson to the repo's",
-    "                 'bypass required pull requests' list and it can join.",
     "  frontend-loop  store cleaned up and versioned, but the repo has NO remote and",
     "                 the current PAT cannot create one (needs org Administration",
     "                 write). Create SkywrightAI/frontend-loop and it can join.",
@@ -52,6 +46,10 @@
       "name": "harold",
       "path": "/Users/ashley/Documents/10.Code-Projects/harold",
       "pushUser": "newpathai"
+    },
+    {
+      "name": "security",
+      "path": "/Users/ashley/Documents/10.Code-Projects/security"
     }
   ]
 }
