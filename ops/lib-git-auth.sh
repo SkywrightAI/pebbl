@@ -41,11 +41,39 @@ pebbl_git_token() {
   "$gh" auth token --user "$PEBBL_PUSH_GH_USER" 2>/dev/null
 }
 
-# Run a git command in $1 with the push account's credentials.
-# Usage: pebbl_git_push "$REPO" push -q origin HEAD
+# Run a git command in $1 with whatever credentials that remote actually needs.
+# Usage: pebbl_git_auth "$REPO" push -q origin HEAD
+#
+# SSH remotes need NOTHING. An SSH key authenticates as the ACCOUNT, so it carries
+# that account's real repo permissions — none of the fine-grained-PAT grant
+# scoping that made a private org repo answer 404, and no `workflow` scope wall on
+# refs that touch .github/workflows/. Since 2026-07-30 the stores use SSH remotes,
+# so this is the normal path and the token dance below is the fallback.
+#
+# The token path stays for HTTPS remotes rather than being deleted: a store added
+# later may well be cloned over HTTPS, and silently failing to push it would be
+# the exact failure this pipeline exists to catch.
 pebbl_git_auth() {
   local repo="$1"; shift
+  local url; url=$(git -C "$repo" remote get-url origin 2>/dev/null || true)
+  case "$url" in
+    git@*|ssh://*)
+      git -C "$repo" "$@"
+      return $?
+      ;;
+  esac
   local tok; tok=$(pebbl_git_token)
   if [ -z "$tok" ]; then return 3; fi   # 3 = no credentials, distinct from a git failure
   GH_TOKEN="$tok" git -C "$repo" "$@"
+}
+
+# Which transport a repo's origin uses, for readable reporting. Kept beside
+# pebbl_git_auth so the thing that DECIDES and the thing that REPORTS can never
+# describe different behaviour.
+pebbl_git_transport() {
+  case "$(git -C "$1" remote get-url origin 2>/dev/null || true)" in
+    git@*|ssh://*) printf 'ssh\n' ;;
+    "") printf 'no-remote\n' ;;
+    *) printf 'https as %s\n' "$PEBBL_PUSH_GH_USER" ;;
+  esac
 }

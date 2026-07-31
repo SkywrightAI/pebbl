@@ -203,7 +203,7 @@ check_push_auth() {
   if ! git -C "$REPO" remote get-url origin >/dev/null 2>&1; then
     fail push-auth "no origin remote configured — git remote add origin <url>"
   elif pebbl_git_auth "$REPO" push --dry-run origin HEAD >/dev/null 2>&1; then
-    ok push-auth "origin accepts a write as gh user '$PEBBL_PUSH_GH_USER'"
+    ok push-auth "origin accepts a write over $(pebbl_git_transport "$REPO")"
   else
     fail push-auth "origin REFUSED a dry-run push as gh user '$PEBBL_PUSH_GH_USER' — token expired or lost repo access; fix it in GitHub token settings (nothing local can repair this)"
   fi
