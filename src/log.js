@@ -10,6 +10,7 @@ const { execFileSync } = require('child_process');
 const { appendLogEvent, appendCorrectLogEvent, appendReassertEvent } = require('./events');
 const { detectRemoteVisibility, redact } = require('./privacy-scan');
 const { guardWrite } = require('./secret-guard');
+const { guardNames } = require('./name-guard');
 const { importanceForTier } = require('./rank');
 
 // P5 — foundation private-by-default (design Q3=B). Decide whether THIS entry's
@@ -153,7 +154,7 @@ module.exports = function log(args) {
     return;
   }
 
-  const message = positional.join(' ').trim();
+  let message = positional.join(' ').trim();
   if (!message) {
     console.error('Usage: pebbl log "[message]"');
     process.exit(1);
@@ -169,6 +170,14 @@ module.exports = function log(args) {
   guardWrite('log', [{ name: 'message', value: message }]);
 
   const pebblDir = requirePebblDir();
+
+  // Write-time PII SUBSTITUTION, after the secret block and before any write.
+  // Unlike a token, a real name does not invalidate the entry — only the name
+  // has to go — so this rewrites rather than refuses: blocking would make the
+  // author choose between losing the memory and editing around the guard, and
+  // people pick "don't write it down", which costs the decision and changes
+  // nothing. No name-map means no-op. Every substitution is printed.
+  message = guardNames('log', [{ name: 'message', value: message }], { opts: { pebblDir } })[0].value;
 
   if (isThinEntry(message)) {
     console.error('pebbl: this reads like a spec sheet — consider adding "because..." to explain the rationale');

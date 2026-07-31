@@ -269,6 +269,51 @@ function redactLine(line) {
 // Missing / unreadable / malformed map => empty denylist (degrade gracefully,
 // never throw). Only `real` strings longer than 2 chars are denylisted, so a
 // one-letter pseudonym key can't carpet-match the whole corpus.
+// Load the anon map as a real -> pseudonym OBJECT.
+//
+// The detector only ever needed the keys (what must not leak), but the
+// write-time name guard needs the VALUES too: it substitutes rather than
+// blocks, so it has to know what to write instead. One loader with one
+// resolution order, so the scanner and the guard can never disagree about which
+// map is in force or which names are in it.
+//
+// Returns {} for a missing / unreadable / malformed map — never throws. A repo
+// without a map is the common case, not an error.
+function loadNameMap(opts = {}) {
+  const candidates = [];
+  if (opts.nameMapPath) candidates.push(opts.nameMapPath);
+  if (process.env.PEBBL_NAME_MAP) candidates.push(process.env.PEBBL_NAME_MAP);
+  if (opts.pebblDir) candidates.push(path.join(opts.pebblDir, 'name-map.json'));
+  if (opts.repoRoot) candidates.push(path.join(opts.repoRoot, 'name-map.json'));
+
+  for (const p of candidates) {
+    try {
+      if (!p || !fs.existsSync(p)) continue;
+      const parsed = JSON.parse(fs.readFileSync(p, 'utf8'));
+      const out = {};
+      if (Array.isArray(parsed)) {
+        // the anon tool's shape: [{real, pseudonym, type}]
+        for (const e of parsed) {
+          if (e && typeof e.real === 'string' && typeof e.pseudonym === 'string') out[e.real] = e.pseudonym;
+        }
+      } else if (parsed && typeof parsed === 'object') {
+        // flat {real: pseudonym}
+        for (const k of Object.keys(parsed)) {
+          if (typeof parsed[k] === 'string') out[k] = parsed[k];
+        }
+      }
+      // Only entries long enough to be a real name: a one- or two-letter key
+      // would carpet-match the whole corpus.
+      const filtered = {};
+      for (const k of Object.keys(out)) if (k.trim().length > 2) filtered[k] = out[k];
+      if (Object.keys(filtered).length) return filtered;
+    } catch {
+      // malformed / unreadable map — try the next candidate, never crash
+    }
+  }
+  return {};
+}
+
 function loadDenylist(opts = {}) {
   if (Array.isArray(opts.denylist)) {
     return opts.denylist.filter((s) => typeof s === 'string' && s.trim().length > 2);
@@ -810,6 +855,7 @@ module.exports = {
   ALLOWLIST_MARKER,
   cli,
   loadDenylist,
+  loadNameMap,
   detectRemoteVisibility,
   // legacy/alt names the verify harness probes for
   scanText: scan,
@@ -825,6 +871,7 @@ module.exports = {
     isPrivateIp,
     isDocumentationIp,
     loadDenylist,
+    loadNameMap,
     detectRemoteVisibility,
     parseGitHost,
     parseGitHubSlug,

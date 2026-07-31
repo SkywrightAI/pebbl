@@ -13,6 +13,7 @@ const { redact } = require('./privacy-scan');
 // Write-time secret BLOCK — keeps an unmarked secret-shape out of the STORE
 // (db.sqlite + events.jsonl), which redact() never protected.
 const { guardWrite } = require('./secret-guard');
+const { guardNames } = require('./name-guard');
 
 // DETAIL-DOC THRESHOLD: past this many chars of done+todo+blocked, a handoff is
 // "detail-heavy" and must link a rendered doc (--docs) or opt out (--no-doc). The
@@ -159,7 +160,7 @@ module.exports = function handoff(args) {
   }
 
   // Mode 4: Create a new handoff (default)
-  const summary = positional.join(' ').trim();
+  let summary = positional.join(' ').trim();
   if (!summary) {
     console.error('Usage: pebbl handoff "[summary]" --done "..." --todo "..."');
     process.exit(1);
@@ -185,9 +186,9 @@ module.exports = function handoff(args) {
   const ts = new Date().toISOString();
   const source = flags.source || 'agent';
   const topics = flags.topic || null;
-  const done = joinField(flags.done);
-  const todo = joinField(flags.todo);
-  const blocked = joinField(flags.blocked);
+  let done = joinField(flags.done);
+  let todo = joinField(flags.todo);
+  let blocked = joinField(flags.blocked);
 
   // Warn on fields that will materialize as one unsearchable block. Each field
   // becomes ';'-split items on close — a long field with no separators stays a
@@ -206,6 +207,17 @@ module.exports = function handoff(args) {
     { name: 'todo', value: todo },
     { name: 'blocked', value: blocked },
   ]);
+
+  // Write-time PII SUBSTITUTION across every persisted handoff field. Same seam
+  // and same reasoning as log.js: a real name does not invalidate the handoff,
+  // so it is rewritten to its pseudonym rather than refused. No name-map means
+  // no-op; every substitution is printed.
+  [summary, done, todo, blocked] = guardNames('handoff', [
+    { name: 'summary', value: summary },
+    { name: 'done', value: done },
+    { name: 'todo', value: todo },
+    { name: 'blocked', value: blocked },
+  ], { opts: { pebblDir } }).map((f) => f.value);
   const docs = flags.docs
     ? JSON.stringify(flags.docs.split(',').map(s => s.trim()).filter(Boolean))
     : null;

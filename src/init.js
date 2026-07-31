@@ -363,6 +363,10 @@ function init(argv) {
     ensureIgnoreLine('.pebbl/events-view.md', '.pebbl/events-view.md (derived tracer)');
     ensureIgnoreLine('.pebbl/*.lock', '.pebbl/*.lock (local locks)');
     ensureIgnoreLine('.pebbl/.rebuild-needed', '.pebbl/.rebuild-needed (local sentinel)');
+    // The anon map holds REAL names by definition — the one store file that must
+    // never be committed. It needs stating HERE because shared mode ignores files
+    // by name rather than blanket-ignoring `.pebbl/`, so nothing else covers it.
+    ensureIgnoreLine('.pebbl/name-map.json', '.pebbl/name-map.json (PII map — never committed)');
     ensureIgnoreLine('!.pebbl/events.jsonl', '.pebbl/events.jsonl (SHARED — committed)');
     // Positive completeness marker: a fresh shared store is 'events' via
     // storeMode step 3 even before its first `pebbl log`. NOT gitignored (shared
@@ -396,6 +400,10 @@ function init(argv) {
     //                                --shared and the blanket `.pebbl/` is dropped.
     ensureIgnoreLine('.pebbl/', '.pebbl/');
     ensureIgnoreLine('.pebbl/events.local.jsonl', '.pebbl/events.local.jsonl (private events)');
+    // NOT name-map.json here: the blanket `.pebbl/` above already covers it, and
+    // the default gitignore is pinned byte-for-byte by test. A store that later
+    // switches to --shared picks up the explicit line then, which is the only
+    // mode where the blanket is gone and the guarantee needs stating.
   }
 
   // .gitattributes — install the union merge driver for events.jsonl.
