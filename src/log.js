@@ -1,7 +1,7 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
-const { parseArgs, assertCompleteFlags, assertIntegerFlags } = require('./args');
+const { parseArgs, assertCompleteFlags, assertIntegerFlags, assertEntryRefFlags } = require('./args');
 const { requirePebblDir } = require('./find-pebbl');
 const { openDb } = require('./db');
 const { loadRubric, classifyEntryMulti, atomicityOf, ensureProjectFiles } = require('./rubric');
@@ -74,11 +74,16 @@ function validate(flags) {
   }
 }
 
-function formatEntry(timestamp, message, category, tier, source, topics) {
+function formatEntry(timestamp, message, category, tier, source, topics, id) {
   const comment = `<!-- cat:${category} topic:${topics || ''} tier:${tier} source:${source} -->`;
 
   const date = timestamp.slice(0, 10);
-  let out = `[${date}] [${tier}|${category}] ${message}`;
+  // Lead with `#id`. `pebbl help entry-ids` tells the user every entry has an
+  // integer id "printed at log time" and to use it with --relates/--corrects —
+  // this is the line that makes that true. Optional so the markdown projection
+  // and any other caller without an id in hand still format cleanly.
+  const ref = id != null ? `#${id} ` : '';
+  let out = `${ref}[${date}] [${tier}|${category}] ${message}`;
   if (topics) out += `\n  topics: ${topics}`;
   return { comment, out };
 }
@@ -137,9 +142,11 @@ module.exports = function log(args) {
   const parsed = parseArgs(args);
   // A value-flag given without a value (e.g. `--corrects --cat decision`) must
   // error, not silently drop — a lost --corrects leaves the contradicted entry
-  // live. Likewise --corrects/--relates must be integer entry IDs, not NULL.
+  // live. --corrects/--relates must name a real entry (local int or eid);
+  // --history is genuinely numeric.
   assertCompleteFlags(parsed);
-  assertIntegerFlags(parsed, ['corrects', 'relates', 'history']);
+  assertEntryRefFlags(parsed, ['corrects', 'relates']);
+  assertIntegerFlags(parsed, ['history']);
   const { flags, positional } = parsed;
 
   // Normalize a deprecated category alias (e.g. --cat correction) to its
@@ -289,8 +296,16 @@ module.exports = function log(args) {
 
   const source = flags.source || 'human';
   const topics = flags.topic || null;
-  const relatesTo = flags.relates ? parseInt(flags.relates, 10) : null;
-  const corrects = flags.corrects ? parseInt(flags.corrects, 10) : null;
+  // --relates/--corrects accept a local int OR an eid (see args.assertEntryRefFlags).
+  // The LEGACY db.sqlite columns are INTEGER FKs over local ids, so only the int
+  // form can land there; an eid ref is carried on the event instead, where the
+  // eid IS the identity. Parse strictly — a bare parseInt('01KZ...') would yield
+  // 1 and silently link the wrong entry.
+  const asLocalInt = (v) => (v != null && /^\d+$/.test(String(v).trim()) ? parseInt(v, 10) : null);
+  const relatesRef = flags.relates || null;   // raw ref, resolved to an eid on the event
+  const correctsRef = flags.corrects || null;
+  const relatesTo = asLocalInt(relatesRef);
+  const corrects = asLocalInt(correctsRef);
 
   // Rerank signal (A): importance is tier-derived by default, NOT 0. This is the
   // launch no-regression safety — at launch access_count is 0 everywhere, so the
@@ -440,6 +455,8 @@ module.exports = function log(args) {
   // corrects target, truncate the .md projection — and exit non-zero. The old
   // behavior ("events.jsonl append skipped", row kept) manufactured exactly
   // the phantom db-only row that shifted every later id off the fold's.
+  // Declared out here so the display id below can read it after the try/catch.
+  let appended = null;
   try {
     // P5 routing: a foundation entry on a PUBLIC remote is private-by-default
     // (lands in events.local.jsonl, gitignored) unless --share is passed. On a
@@ -464,17 +481,27 @@ module.exports = function log(args) {
     // `source` rides the event too (present-only, see events.sourceField): the
     // DB row above stores it, so the event must as well or a rebuild-from-
     // events re-labels agent/hook rows as 'human' (fold/db source drift).
-    if (corrects != null) {
-      appendCorrectLogEvent(
+    // `relatesRef` rides BOTH paths: a see-also link is orthogonal to a
+    // supersession, so `--corrects A --relates B` records both. Each ref is
+    // resolved to an eid inside the store lock (events.resolveEntryRef).
+    //
+    // We keep the append's return value to learn the entry's FOLD id — the
+    // number search/context display and the one --relates/--corrects resolve
+    // against. It is NOT always db.sqlite's lastInsertRowid: a migrated store
+    // has an empty db.sqlite beside a full events log, so the two counters sit
+    // far apart and printing the db id would hand the user a ref that resolves
+    // to the wrong entry (or to nothing).
+    if (correctsRef != null) {
+      appended = appendCorrectLogEvent(
         pebblDir,
-        { ts, category, tier, message, topics, source, correctsLocalId: corrects, assert_key: assertKey, outcome },
+        { ts, category, tier, message, topics, source, correctsLocalId: correctsRef, relatesRef, assert_key: assertKey, outcome },
         (rows) => rebuildEventsView(pebblDir, rows),
         { local },
       );
     } else {
-      appendLogEvent(
+      appended = appendLogEvent(
         pebblDir,
-        { ts, category, tier, message, topics, source, assert_key: assertKey, outcome },
+        { ts, category, tier, message, topics, source, relatesRef, assert_key: assertKey, outcome },
         (rows) => rebuildEventsView(pebblDir, rows),
         { local },
       );
@@ -506,7 +533,15 @@ module.exports = function log(args) {
   // atomic entries. One line, machine-readable, on stderr — never blocks.
   if (lintMsg) console.error(lintMsg);
 
-  console.log(mdEntry.out);
+  // Print the id the READ side uses. In an events store that is the fold's int
+  // for this event's eid (what search/context show, what --relates resolves);
+  // in a legacy store the fold never ran, so db.sqlite's rowid IS that id.
+  let displayId = newId;
+  if (appended && appended.event && Array.isArray(appended.rows)) {
+    const mine = appended.rows.find((r) => r.eid === appended.event.eid);
+    if (mine && mine.id != null) displayId = mine.id;
+  }
+  console.log(formatEntry(ts, message, category, tier, source, topics, displayId).out);
 };
 
 // Rebuild the folded view projection from the event log. P1 fills in the

@@ -139,6 +139,25 @@ function assertFields({ assert_key, occurrences, outcome } = {}) {
   return out;
 }
 
+// Optional `relates_to` tail. PRESENT-ONLY, exactly like sourceField /
+// lessonFields / assertFields: the field is stamped only when the caller
+// supplied a real eid, so an event without a relation serializes byte-for-byte
+// as before and every existing line folds unchanged.
+//
+// ALWAYS AN EID ON THE WIRE — the same contract `corrects` keeps, and for the
+// same reason: the local integer id is a per-machine rebuild artifact (fold.js
+// mints it from row order), so a raw int on the wire would point at a different
+// entry on another clone. fold.js already reads THIS field name off the event
+// (`relatesToEid: e.relates_to`) and translates it back to a local int for the
+// read model, so the name must not drift.
+function relatesField({ relates_to } = {}) {
+  const out = {};
+  if (relates_to != null && String(relates_to).trim() !== '') {
+    out.relates_to = String(relates_to);
+  }
+  return out;
+}
+
 // Build a `reassert` event — "this exact fact was asserted again." It carries
 // ONLY the identity key, never the message: the message already lives on the
 // original `append`, and re-shipping it would reintroduce the duplication this
@@ -172,6 +191,7 @@ function makeAppendEvent(pebblDir, fields = {}) {
     ...sourceField(fields),
     ...lessonFields(fields),
     ...assertFields(fields),
+    ...relatesField(fields),
   };
 }
 
@@ -199,9 +219,12 @@ function makeCorrectEvent(pebblDir, fields = {}) {
     corrects: corrects || null,
     // A re-fix recorded as a `correct` (e.g. the GLM-judge saga's later attempt)
     // carries the SAME optional source + lesson tails as an append — additive,
-    // present-only.
+    // present-only. `relates_to` rides here too: a correction can also point
+    // sideways at context (--corrects A --relates B), and the two links are
+    // orthogonal (supersede vs see-also).
     ...sourceField(fields),
     ...lessonFields(fields),
+    ...relatesField(fields),
   };
 }
 
@@ -441,9 +464,48 @@ function foldAndRebuild(pebblDir, rebuild) {
 // the write on a throw without creating db/events divergence. log.js relies
 // on this to delete the freshly-inserted db row — the phantom-row drift the
 // identity resolver tolerates must never be CREATED by this path.
+// Resolve a user-typed entry reference to an EID. Accepts BOTH forms a user can
+// actually see:
+//   - a local integer id (what `log`/`search`/`context` print as #N), which is a
+//     per-machine artifact of the fold's row order, so it must be translated
+//   - a 26-char Crockford-base32 ULID eid, which is what events.jsonl carries and
+//     the only identity that means the same thing in every clone
+//
+// Returns the eid, or null when the ref resolves to nothing (dangling int, an
+// eid not in this store, a row that exists only in a legacy db.sqlite). Callers
+// treat null as "log the entry without the link" rather than stamping a wrong
+// target — the same fail-soft the corrects path already used.
+//
+// MUST be called inside the store lock: it folds the CURRENT stream to build the
+// eid->int map, so a concurrent append between resolve and write would shift the
+// mapping underneath the int the user saw.
+function resolveEntryRef(pebblDir, ref) {
+  if (ref == null || String(ref).trim() === '') return null;
+  const raw = String(ref).trim();
+  const { eidToInt } = foldFull(readEvents(pebblDir));
+  // eid form: pass through, but only if it names a row in THIS store.
+  if (/^[0-9A-HJKMNP-TV-Z]{26}$/i.test(raw)) {
+    const eid = raw.toUpperCase();
+    return eidToInt.has(eid) ? eid : null;
+  }
+  // local int form: invert the fold map.
+  if (/^\d+$/.test(raw)) {
+    const int = parseInt(raw, 10);
+    for (const [eid, i] of eidToInt) {
+      if (i === int) return eid;
+    }
+  }
+  return null;
+}
+
 function appendLogEvent(pebblDir, fields, rebuild, opts = {}) {
   return withLock(pebblDir, () => {
-    const event = makeAppendEvent(pebblDir, fields);
+    // --relates on a plain append: resolve inside the lock, same as --corrects.
+    // An unresolvable ref degrades to an unlinked append rather than failing the
+    // write — losing the see-also link is recoverable, losing the entry is not.
+    const { relatesRef, ...domain } = fields;
+    const relates_to = resolveEntryRef(pebblDir, relatesRef);
+    const event = makeAppendEvent(pebblDir, { ...domain, relates_to });
     // P5: a private entry (foundation, private-by-default on a public remote,
     // no --share) is appended to events.local.jsonl; everything else to the
     // shared events.jsonl. The fold reads BOTH via readEvents, so the row shows
@@ -491,15 +553,13 @@ function appendReassertEvent(pebblDir, fields, rebuild, opts = {}) {
 // was appended; the post-append fold/rebuild is best-effort.
 function appendCorrectLogEvent(pebblDir, fields, rebuild, opts = {}) {
   return withLock(pebblDir, () => {
-    const { correctsLocalId, ...domain } = fields;
-    // Resolve local int -> eid via the live fold map (eid is the wire identity).
-    let correctsEid = null;
-    if (correctsLocalId != null) {
-      const { eidToInt } = foldFull(readEvents(pebblDir));
-      for (const [eid, int] of eidToInt) {
-        if (int === correctsLocalId) { correctsEid = eid; break; }
-      }
-    }
+    const { correctsLocalId, relatesRef, ...domain } = fields;
+    // Resolve BOTH links inside the lock via the live fold map (eid is the wire
+    // identity). resolveEntryRef takes a local int or an eid; the two links are
+    // orthogonal, so a correction may also carry a see-also.
+    const correctsEid = resolveEntryRef(pebblDir, correctsLocalId);
+    const relates_to = resolveEntryRef(pebblDir, relatesRef);
+    domain.relates_to = relates_to;
     // No eid to point at -> log the new belief as a plain append (no link),
     // rather than emit a correct that targets nothing (which folds to a no-op
     // stamp but muddies the wire). With an eid, emit the correct event the fold
@@ -559,6 +619,7 @@ module.exports = {
   readEvents,
   fold,
   foldFull,
+  resolveEntryRef,
   appendLogEvent,
   appendReassertEvent,
   appendCorrectLogEvent,
