@@ -45,7 +45,16 @@ function setFlag(flags, key, value) {
 // Flags whose value must be a positive integer (entry IDs). Used by the shared
 // guard below so a non-numeric value errors loudly instead of silently storing
 // NULL (parseInt('abc') === NaN, which SQLite coerces to NULL).
-const INTEGER_FLAGS = new Set(['relates', 'corrects', 'n', 'history']);
+const INTEGER_FLAGS = new Set(['n', 'history']);
+
+// Flags that name ANOTHER ENTRY. Two spellings are legal because two are
+// visible to the user: the local integer id printed by log/search/context, and
+// the 26-char Crockford-base32 ULID eid carried in events.jsonl. The eid is the
+// only identity that survives a rebuild or means the same thing in another
+// clone, so refusing it (the pre-fix behaviour) made the flags unusable for
+// anyone reading the event log — the machine-readable surface — directly.
+const ENTRY_REF_FLAGS = new Set(['relates', 'corrects']);
+const ULID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/i;
 
 function parseArgs(args) {
   const flags = {};
@@ -142,4 +151,29 @@ function assertIntegerFlags(parsed, keys = INTEGER_FLAGS) {
   }
 }
 
-module.exports = { parseArgs, assertCompleteFlags, assertIntegerFlags, INTEGER_FLAGS, MULTI_FLAGS };
+// Guard for --relates/--corrects: a positive local int, or a ULID eid. Rejects
+// anything else loudly rather than letting it reach the store, where a bad ref
+// would silently degrade to an unlinked entry (events) or a NULL FK (legacy).
+function assertEntryRefFlags(parsed, keys = ENTRY_REF_FLAGS) {
+  const flags = parsed.flags || {};
+  for (const key of keys) {
+    const raw = flags[key];
+    if (raw === undefined || raw === null) continue;
+    const v = String(raw).trim();
+    if (/^\d+$/.test(v) || ULID_RE.test(v)) continue;
+    console.error(
+      `pebbl: --${key} expects an entry id — a number like 42, or a 26-character eid from events.jsonl. Got "${raw}"`
+    );
+    process.exit(1);
+  }
+}
+
+module.exports = {
+  parseArgs,
+  assertCompleteFlags,
+  assertIntegerFlags,
+  assertEntryRefFlags,
+  INTEGER_FLAGS,
+  ENTRY_REF_FLAGS,
+  MULTI_FLAGS,
+};

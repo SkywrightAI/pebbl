@@ -127,7 +127,11 @@ function formatResult(r) {
     const open = r.status === 'open' ? ' · OPEN' : '';
     out = `[handoff #${r.handoffId}${open} · ${r.field}] ${r.date} — ${stripHandoffPrefix(r.message)}`;
   } else {
-    out = `[${r.tier}|${r.cat}] ${r.date} — ${r.message}`;
+    // `#id` leads the line so it can be copied straight into --relates/--corrects.
+    // Guarded: mirror hits come from another machine's projection and carry no
+    // local id (and that id would be meaningless here anyway).
+    const ref = r.id != null ? `#${r.id} ` : '';
+    out = `${ref}[${r.tier}|${r.cat}] ${r.date} — ${r.message}`;
   }
   if (r.machine) out = `[${r.machine}] ` + out;
   if (r.topics) out += `\n  topics: ${r.topics}`;
@@ -266,7 +270,9 @@ function searchSqlite(pebblDir, query, cat, topic, mirrorResults, sourceResults)
   // entries are excluded by the same `valid_to IS NULL` predicate the context
   // read sites use (one definition, via notCorrected()), instead of the old
   // hide-by-subquery. Their history stays reachable via `pebbl log --history`.
-  let sql = `SELECT timestamp, source, category, tier, message, topics FROM logs WHERE tier != 'archived' AND ${notCorrected()} AND ${messageClause}`;
+  // `id` is selected for DISPLAY, not filtering: search is where a user finds an
+  // older entry to point --relates/--corrects at, so the id has to be on screen.
+  let sql = `SELECT id, timestamp, source, category, tier, message, topics FROM logs WHERE tier != 'archived' AND ${notCorrected()} AND ${messageClause}`;
   const params = terms.map(t => `%${t}%`);
 
   if (cat) {
@@ -284,6 +290,7 @@ function searchSqlite(pebblDir, query, cat, topic, mirrorResults, sourceResults)
 
   const logResults = rows.map(row => ({
     isHandoff: false,
+    id: row.id,
     tier: row.tier,
     cat: row.category,
     topics: row.topics,
@@ -354,7 +361,7 @@ function searchFts5(pebblDir, query, cat, topic, mirrorResults, sourceResults) {
   // so ascending = most relevant first); `id` is the deterministic tie-break that
   // makes equal-score rows order reproducibly across git-synced machines.
   let sql =
-    `SELECT l.timestamp, l.source, l.category, l.tier, l.message, l.topics ` +
+    `SELECT l.id, l.timestamp, l.source, l.category, l.tier, l.message, l.topics ` +
     `FROM ${FTS_TABLE} f JOIN logs l ON l.id = f.rowid ` +
     `WHERE f.${FTS_TABLE} MATCH ? AND l.tier != 'archived' AND l.${notCorrected()}`;
   const params = [match];
@@ -377,6 +384,7 @@ function searchFts5(pebblDir, query, cat, topic, mirrorResults, sourceResults) {
 
   const logResults = rows.map(row => ({
     isHandoff: false,
+    id: row.id,
     tier: row.tier,
     cat: row.category,
     topics: row.topics,

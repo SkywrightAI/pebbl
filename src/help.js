@@ -58,14 +58,28 @@ Rules:
 db.sqlite is the source of truth. The .md files are projections — regenerable,
 safe to delete (they'll re-materialize on the next pebbl write).`,
   'entry-ids': `Entry IDs:
-  Every log entry has an integer ID, printed at log time.
-  Find an ID with 'pebbl search' or 'pebbl context'.
+  An entry can be named two ways, and --relates/--corrects accept either:
+
+    #42                          the local integer, printed at log time and
+                                 shown by 'pebbl search' and 'pebbl context'
+    01KZ6R8Y3KWNTP4H1CVQT9R9Q8   the eid, carried in .pebbl/events.jsonl
+
+  Which to use: the integer is for you at the terminal. It is a per-machine
+  artifact of how the log folds into rows, so it can differ between clones and
+  shift after a compaction. The eid is minted once and means the same entry
+  everywhere — prefer it in scripts, and whenever you are reading events.jsonl
+  directly.
 
   Use IDs with:
-    --relates <id>    link this entry to a related one (bidirectional reference)
+    --relates <id>    link this entry to a related one (a see-also; both entries
+                      stay live and current)
     --corrects <id>   supersede a prior entry — the old one stays searchable
                       but is marked as corrected
-    --resolve <id:action>  (compact) decide what to do with an ambiguous entry`,
+    --resolve <id:action>  (compact) decide what to do with an ambiguous entry
+
+  The two links are independent: --corrects A --relates B records both.
+  A reference that names no entry in this store logs the entry WITHOUT the
+  link rather than failing the write.`,
 };
 
 const SUBCOMMANDS = {
@@ -152,7 +166,9 @@ Flags:
   --tier <tier>        foundation|component|detail|fleeting
   --scope foundation   shortcut: promote to foundation tier
   --source <source>    human|agent|hook (default: human)
-  --relates <id>       link to a related entry ID
+  --relates <id>       link to a related entry (a see-also; both stay live).
+                       <id> is the #N printed at log time or an eid from
+                       events.jsonl — see 'pebbl help entry-ids'
   --corrects <id>      supersede a prior entry (old entry stays searchable, marked corrected)
   --key <identity>     this is the SAME FACT as before. A repeat assert of a key
                        that already has a live entry COUNTS instead of adding a
