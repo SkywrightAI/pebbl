@@ -512,3 +512,77 @@ describe('pebbl doctor --metrics (CLI)', () => {
     }
   });
 });
+
+describe('doctor - install health', () => {
+  const { execFileSync, spawnSync } = require('child_process');
+  const os = require('os');
+  const fsx = require('fs');
+  const pathx = require('path');
+  const BINX = pathx.resolve(__dirname, '../bin/pebbl.js');
+  const { _internal } = require('../src/doctor');
+  const { openDb } = require('../src/db');
+
+  function repoWithPebbl() {
+    const dir = fsx.mkdtempSync(pathx.join(os.tmpdir(), 'pebbl-doc-install-'));
+    execFileSync('git', ['init', '-q'], { cwd: dir });
+    execFileSync('git', ['config', 'user.email', 'a@b.c'], { cwd: dir });
+    execFileSync('git', ['config', 'user.name', 't'], { cwd: dir });
+    spawnSync(process.execPath, [BINX, 'init', '--no-claude-hooks'], { cwd: dir });
+    return dir;
+  }
+  const commit = (dir, msg) => {
+    fsx.writeFileSync(pathx.join(dir, `${msg.replace(/\W/g, '')}.txt`), msg);
+    execFileSync('git', ['add', '-A'], { cwd: dir });
+    execFileSync('git', ['commit', '-q', '-m', msg], { cwd: dir });
+  };
+
+  it('reports missing hooks and commits made while they were gone', () => {
+    const dir = repoWithPebbl();
+    try {
+      commit(dir, 'captured one');
+      for (const h of ['post-commit', 'pre-push']) fsx.rmSync(pathx.join(dir, '.git', 'hooks', h));
+      commit(dir, 'lost one');
+      const r = spawnSync(process.execPath, [BINX, 'doctor'], { cwd: dir, encoding: 'utf8' });
+      assert.match(r.stdout, /git post-commit hook not installed/);
+      assert.match(r.stdout, /git pre-push hook not installed/);
+      assert.match(r.stdout, /1 commit since .* never captured/);
+      assert.match(r.stdout, /lost one/);
+      const j = JSON.parse(spawnSync(process.execPath, [BINX, 'doctor', '--json'], { cwd: dir, encoding: 'utf8' }).stdout);
+      assert.deepEqual(j.filter((f) => f.dimension === 'hook').length, 2);
+      assert.equal(j.filter((f) => f.dimension === 'capture').length, 1);
+    } finally {
+      fsx.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a rebased (re-hashed) commit still counts as captured', () => {
+    const dir = repoWithPebbl();
+    try {
+      commit(dir, 'first change');
+      commit(dir, 'second change');
+      // amend rewrites the hash, like pull --rebase; post-commit captures the new
+      // hash too, so drop the hooks first to simulate a hash-only rewrite.
+      fsx.rmSync(pathx.join(dir, '.git', 'hooks', 'post-commit'));
+      execFileSync('git', ['commit', '-q', '--amend', '--no-edit', '--date=now'], { cwd: dir });
+      const db = openDb(pathx.join(dir, '.pebbl'));
+      const u = _internal.detectUncapturedCommits(db, dir);
+      db.close();
+      assert.equal(u.count, 0);
+    } finally {
+      fsx.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a healthy repo has no install findings', () => {
+    const dir = repoWithPebbl();
+    try {
+      commit(dir, 'only change');
+      assert.deepEqual(_internal.detectHookProblems(dir), []);
+      const db = openDb(pathx.join(dir, '.pebbl'));
+      assert.equal(_internal.detectUncapturedCommits(db, dir).count, 0);
+      db.close();
+    } finally {
+      fsx.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

@@ -668,3 +668,133 @@ describe('handoff - docs', () => {
     assert.strictEqual(row.docs, null);
   });
 });
+
+describe('handoff - supersede and carry (end to end)', () => {
+  const { carriedTodos } = require('../src/handoff');
+  const { readEvents, foldFull } = require('../src/events');
+  const rows = (dir) => {
+    const db = new Database(path.join(dir, '.pebbl', 'db.sqlite'), { readonly: true });
+    try { return db.prepare('SELECT id, status, todo FROM handoffs ORDER BY id').all(); } finally { db.close(); }
+  };
+
+  it('a second handoff closes the first and carries its unlisted todos', () => {
+    const dir = initProject();
+    try {
+      assert.equal(runHandoff(dir, ['first session', '--todo', 'wire the judge; fix (a; b) parsing', '--topic', 'kiowa']).status, 0);
+      const r = runHandoff(dir, ['second session', '--done', 'wire the judge', '--todo', 'ship it', '--topic', 'emporia']);
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stdout, /Closed earlier handoff: #1/);
+      assert.match(r.stdout, /from #1: fix \(a; b\) parsing/);
+      const [h1, h2] = rows(dir);
+      assert.equal(h1.status, 'closed');
+      assert.equal(h2.status, 'open');
+      assert.deepEqual(splitItems(h2.todo), ['ship it', 'from #1: fix (a; b) parsing']);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a carried item keeps its origin and is not carried twice', () => {
+    const dir = initProject();
+    try {
+      runHandoff(dir, ['first one', '--todo', 'call the county']);
+      runHandoff(dir, ['second one', '--todo', 'other thing']);
+      runHandoff(dir, ['third one', '--done', 'other thing']);
+      const h3 = rows(dir)[2];
+      assert.deepEqual(splitItems(h3.todo), ['from #1: call the county']);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('--keep-open leaves earlier handoffs open and carries nothing', () => {
+    const dir = initProject();
+    try {
+      runHandoff(dir, ['first one', '--todo', 'a thing to do']);
+      const r = runHandoff(dir, ['second one', '--keep-open']);
+      assert.equal(r.status, 0, r.stderr);
+      assert.deepEqual(rows(dir).map((h) => [h.status, h.todo]), [['open', 'a thing to do'], ['open', null]]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('writes handoff-open/close events the fold agrees with', () => {
+    const dir = initProject();
+    try {
+      runHandoff(dir, ['first one', '--todo', 'x item here']);
+      runHandoff(dir, ['second one']);
+      const events = readEvents(path.join(dir, '.pebbl'));
+      assert.deepEqual(events.filter((e) => e.type.startsWith('handoff')).map((e) => e.type),
+        ['handoff-open', 'handoff-open', 'handoff-close']);
+      const folded = foldFull(events).handoffs;
+      assert.deepEqual(folded.map((h) => [h.summary, h.status]), [['first one', 'closed'], ['second one', 'open']]);
+      assert.match(folded[1].todo, /from #1: x item here/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('--close <id> also writes a handoff-close event', () => {
+    const dir = initProject();
+    try {
+      runHandoff(dir, ['solo handoff']);
+      assert.equal(runHandoff(dir, ['--close', '1']).status, 0);
+      const folded = foldFull(readEvents(path.join(dir, '.pebbl'))).handoffs;
+      assert.equal(folded[0].status, 'closed');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('carriedTodos: covered by containment either way, deduped across priors', () => {
+    const priors = [
+      { id: 3, todo: 'approve RM030 on board; build zero-plate pipeline' },
+      { id: 4, todo: 'from #3: build zero-plate pipeline; reply to Rody' },
+    ];
+    assert.deepEqual(carriedTodos(priors, ['approve RM030', null]), [
+      'from #3: build zero-plate pipeline',
+      'from #4: reply to Rody',
+    ]);
+  });
+});
+
+describe('handoff - docs mode from config', () => {
+  const setMode = (dir, mode) => {
+    const cfg = path.join(dir, '.pebbl', 'config.yml');
+    fs.writeFileSync(cfg, fs.readFileSync(cfg, 'utf8').replace(/docs: when-heavy/, `docs: ${mode}`));
+  };
+  const heavy = 'x'.repeat(700) + '; ' + 'y'.repeat(700);
+
+  it('never: a long handoff needs no doc', () => {
+    const dir = initProject();
+    try {
+      setMode(dir, 'never');
+      assert.equal(runHandoff(dir, ['long one', '--done', heavy]).status, 0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('always: even a short handoff needs --docs or --no-doc', () => {
+    const dir = initProject();
+    try {
+      setMode(dir, 'always');
+      const r = runHandoff(dir, ['short one']);
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /handoff\.docs: always/);
+      assert.equal(runHandoff(dir, ['short one', '--no-doc']).status, 0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('when-heavy (default) still refuses a long undocumented handoff', () => {
+    const dir = initProject();
+    try {
+      assert.equal(runHandoff(dir, ['long one', '--done', heavy]).status, 1);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

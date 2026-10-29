@@ -288,6 +288,44 @@ function makeCommitEvent(pebblDir, { ts, hash, message, files, category, actor }
   };
 }
 
+// Handoff event makers. Field names are exactly what fold.js's `handoff-open` /
+// `handoff-close` cases read (and what migrate-to-events mints), so a store
+// that goes shared or events-mode keeps its handoffs on rebuild — before these,
+// create/close only wrote db.sqlite and the fold never saw a live handoff.
+// session_entries/session_commits are eid lists on the wire; the live writer
+// passes [] because db.sqlite rows carry no eid (display-only detail, lossy).
+function makeHandoffOpenEvent(pebblDir, { ts, summary, done, todo, blocked, topics, source, docs, actor }) {
+  return {
+    ...makeEnvelope(pebblDir, 'handoff-open', { ts, actor }),
+    summary: summary || '',
+    done: done || null,
+    todo: todo || null,
+    blocked: blocked || null,
+    topics: topics || null,
+    source: source || 'agent',
+    session_entries: [],
+    session_commits: [],
+    docs: docs || null,
+  };
+}
+
+function makeHandoffCloseEvent(pebblDir, { ts, handoff, actor }) {
+  return {
+    ...makeEnvelope(pebblDir, 'handoff-close', { ts, actor }),
+    handoff,
+  };
+}
+
+// The eid of the `handoff-open` event for a db.sqlite handoff row, matched on
+// (timestamp, summary) — the row has no eid column. null when the handoff
+// predates handoff events (nothing in the fold to close).
+function findHandoffOpenEid(pebblDir, { timestamp, summary }) {
+  const hit = readEvents(pebblDir).find(
+    (e) => e.type === 'handoff-open' && e.ts === timestamp && (e.summary || '') === (summary || '')
+  );
+  return hit ? hit.eid : null;
+}
+
 // Liveness event makers (Primitive 2). Both ride the SAME makeEnvelope head as
 // every maker above (eid/ts/emitted_at/actor/v) — additive, never touching an
 // existing type. The fold (src/fold.js) builds a `liveness` projection from
@@ -610,6 +648,9 @@ module.exports = {
   makeResolveEvent,
   makeExpireEvent,
   makeCommitEvent,
+  makeHandoffOpenEvent,
+  makeHandoffCloseEvent,
+  findHandoffOpenEid,
   makeLivenessRegisterEvent,
   makeLivenessRetireEvent,
   makeHeartbeatEvent,

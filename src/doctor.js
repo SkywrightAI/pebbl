@@ -16,6 +16,8 @@ const { _internal: searchInternal } = require('./search');
 // what "malformed" means (one definition, no second copy to drift). See
 // src/handoff.js malformedSummary.
 const { malformedSummary } = require('./handoff');
+const { execFileSync } = require('child_process');
+const { gitHookHealth } = require('./hooks');
 
 // `pebbl doctor` — a report-only memory-health command. Where `check` compares
 // memory-vs-code (does a cited file still exist?), `doctor` compares
@@ -433,6 +435,64 @@ function printMetrics(m) {
 // objects { dimension, ids, reason, suggested } — the contract the scheduling +
 // LLM-judgment follow-up consumes. `suggested` is the exact `pebbl log` command
 // to run if the caller decides the entry is wrong.
+// ── install health (the store vs the repo it lives in) ──────────────────────
+// Separate from diagnose(): these read git and the hooks dir, not memory.
+
+const HOOK_ADVICE = {
+  missing: 'not installed',
+  foreign: 'is another tool\'s hook, not pebbl\'s',
+  'not-executable': 'is not executable',
+  'pinned-bin-missing': 'pins a pebbl that no longer exists',
+};
+
+// pebbl hooks that aren't working. Empty outside a git repo.
+function detectHookProblems(repoRoot) {
+  const health = gitHookHealth(repoRoot);
+  if (!health) return [];
+  return health.filter((h) => h.status !== 'ok');
+}
+
+// Commits on HEAD made since the store started capturing that the commits
+// table doesn't hold. Matched on hash OR subject line: a rebase (Mobile-Home-
+// Parks pulls with --rebase) rewrites every hash but keeps the message. Merge
+// commits and GitHub-made commits are skipped — no local post-commit ever runs
+// for those. Returns { count, examples, since } or null when there is nothing
+// to compare (no git, no captures yet).
+function detectUncapturedCommits(db, repoRoot, { cap = 5 } = {}) {
+  let captured;
+  try {
+    captured = db.prepare('SELECT timestamp, hash, message FROM commits ORDER BY timestamp ASC').all();
+  } catch {
+    return null;
+  }
+  if (captured.length === 0) return null;
+  const since = captured[0].timestamp;
+  let log;
+  try {
+    log = execFileSync('git', ['log', '--no-merges', `--since=${since}`, '--format=%H%x00%ce%x00%s'], {
+      cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+    });
+  } catch {
+    return null;
+  }
+  const hashes = new Set(captured.map((c) => c.hash));
+  const subjects = new Set(captured.map((c) => String(c.message || '').split('\n')[0].trim()));
+  const missing = [];
+  for (const line of log.split('\n')) {
+    if (!line) continue;
+    const [hash, committer, subject] = line.split('\0');
+    if (committer === 'noreply@github.com') continue;
+    if (hashes.has(hash) || subjects.has(String(subject).trim())) continue;
+    missing.push({ hash, subject });
+  }
+  return { count: missing.length, examples: missing.slice(0, cap), since };
+}
+
+function installFindingCount(install) {
+  if (!install) return 0;
+  return install.hooks.length + (install.uncaptured && install.uncaptured.count ? 1 : 0);
+}
+
 function toJson(results) {
   const out = [];
   for (const c of results.contradictions) {
@@ -481,6 +541,24 @@ function toJson(results) {
       ids: [c.entry.id],
       reason: `matches ${c.categories.length} categories (${c.categories.join(', ')}) — likely several facts in one entry`,
       suggested: splitHint(c.entry.id),
+    });
+  }
+  const install = results.install;
+  for (const h of (install && install.hooks) || []) {
+    out.push({
+      dimension: 'hook',
+      ids: [],
+      reason: `git ${h.name} hook ${HOOK_ADVICE[h.status] || h.status}`,
+      suggested: 'pebbl upgrade',
+    });
+  }
+  if (install && install.uncaptured && install.uncaptured.count) {
+    const u = install.uncaptured;
+    out.push({
+      dimension: 'capture',
+      ids: [],
+      reason: `${u.count} commit${u.count === 1 ? '' : 's'} since ${u.since.slice(0, 10)} never captured (e.g. ${u.examples.map((e) => e.hash.slice(0, 7)).join(', ')})`,
+      suggested: 'pebbl upgrade (reinstalls the post-commit hook); pebbl scan-commits to log decisions they held',
     });
   }
   return out;
@@ -568,6 +646,10 @@ module.exports = function doctor(args) {
   opts.handoffs = handoffs;
 
   const results = diagnose(entries, repoRoot, opts);
+  results.install = {
+    hooks: detectHookProblems(repoRoot),
+    uncaptured: detectUncapturedCommits(db, repoRoot),
+  };
 
   if (flags.json) {
     console.log(JSON.stringify(toJson(results), null, 2));
@@ -575,7 +657,8 @@ module.exports = function doctor(args) {
   }
 
   const total = results.contradictions.length + results.staleness.length
-    + results.missing.length + results.handoffs.length + results.nonatomic.length;
+    + results.missing.length + results.handoffs.length + results.nonatomic.length
+    + installFindingCount(results.install);
   if (total === 0) {
     console.log('pebbl doctor: memory looks consistent — no contradictions, stale beliefs, missing artifacts, stale/malformed handoffs, or non-atomic entries flagged.');
     return;
@@ -634,6 +717,23 @@ module.exports = function doctor(args) {
     }
   }
 
+  const install = results.install;
+  if (installFindingCount(install)) {
+    console.log(`\nInstall — the hooks that feed memory:\n`);
+    for (const h of install.hooks) {
+      console.log(`git ${h.name} hook ${HOOK_ADVICE[h.status] || h.status}${h.pinned ? ` (${h.pinned})` : ''}`);
+    }
+    if (install.hooks.length) console.log(`   fix:  pebbl upgrade`);
+    const u = install.uncaptured;
+    if (u && u.count) {
+      console.log(`${u.count} commit${u.count === 1 ? '' : 's'} since ${u.since.slice(0, 10)} never captured, e.g.:`);
+      for (const e of u.examples) console.log(`   ${e.hash.slice(0, 7)} ${truncate(String(e.subject || ''))}`);
+      console.log(`   reason: post-commit hook missing when they were made, or made on another machine`);
+      console.log(`   fix:  pebbl upgrade; pebbl scan-commits suggests entries for decisions they held`);
+    }
+    console.log();
+  }
+
   if (results.nonatomic.length) {
     const n = results.nonatomic.length;
     console.log(`\nNon-atomic entries — ${n} ${n === 1 ? 'entry looks' : 'entries look'} like several facts crammed into one row:\n`);
@@ -652,6 +752,8 @@ module.exports._internal = {
   detectMissing,
   detectHandoffHealth,
   detectNonAtomic,
+  detectHookProblems,
+  detectUncapturedCommits,
   atomicityMetrics,
   diagnose,
   toJson,

@@ -111,8 +111,16 @@ pebbl init
 This creates `.pebbl/` with:
 - `db.sqlite` — your project memory (searchable, queryable)
 - `rubric.yml` — rules for auto-classifying entries
-- `config.yml` — pebbl settings
-- `AGENTS.md` — guidance for agents to follow
+- `config.yml` — pebbl settings (`handoff:` picks when a handoff must link a doc; `session_check:` opts into the decisions-file check)
+- `AGENTS.md` — guidance for agents to follow, rendered from `config.yml`
+
+It also installs, outside `.pebbl/`:
+- five git hooks (commit capture, rebuild sentinel, privacy scan), pinned to this pebbl and node
+- `@AGENTS.md` at the top of an existing `CLAUDE.md`, so Claude Code reads the guidance
+- a Claude Code Stop hook in `.claude/settings.local.json` (`pebbl check-session`) that holds a turn which changed files without logging; skip it with `--no-claude-hooks`
+- a narrative seeded from README's first paragraph, if none is set
+
+Hooks don't travel with git: after cloning a repo that uses pebbl, run `pebbl upgrade` to put them back.
 
 Commit `.pebbl/` (but not the markdown projections — they're cached).
 
