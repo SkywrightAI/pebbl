@@ -53,10 +53,7 @@ function renderManualLogsMd(logs) {
 // handoffs.md. materializeHandoffsMd orders handoffs by id ASC, emits a
 // summary block + one block per ';'-split done/todo/blocked item, joined by
 // '\n'. ts = closed_at || timestamp. Verbatim from handoff.js:248-272.
-function splitItems(field) {
-  if (!field) return [];
-  return field.split(';').map((s) => s.trim()).filter(Boolean);
-}
+const { splitItems } = require('./items');
 function renderHandoffsMd(handoffs) {
   const ordered = handoffs.slice().sort((a, b) => a.id - b.id);
   const out = ['# Handoffs', ''];

@@ -4,7 +4,8 @@ const path = require('path');
 const { parseArgs } = require('./args');
 const { requirePebblDir } = require('./find-pebbl');
 const { openDb } = require('./db');
-const { ensureProjectFiles } = require('./rubric');
+const { ensureProjectFiles, loadConfig, handoffSettings } = require('./rubric');
+const { makeHandoffOpenEvent, makeHandoffCloseEvent, findHandoffOpenEid, appendEventBatch } = require('./events');
 const { displayEntry } = require('./log');
 const { mirrorHandoffs, stripHandoffPrefix } = require('./mirror');
 // Projection-boundary secret mask. handoffs.md is committed and the promote
@@ -14,6 +15,8 @@ const { redact } = require('./privacy-scan');
 // (db.sqlite + events.jsonl), which redact() never protected.
 const { guardWrite } = require('./secret-guard');
 const { guardNames } = require('./name-guard');
+// Items split on top-level ';' only (a ';' inside parens stays in its item).
+const { splitItems } = require('./items');
 
 // DETAIL-DOC THRESHOLD: past this many chars of done+todo+blocked, a handoff is
 // "detail-heavy" and must link a rendered doc (--docs) or opt out (--no-doc). The
@@ -130,31 +133,16 @@ module.exports = function handoff(args) {
     }
 
     const ts = new Date().toISOString();
+    const { demoted, closeEvent } = closeHandoffRow(db, pebblDir, row, ts);
+    appendHandoffEvents(pebblDir, closeEvent ? [closeEvent] : []);
 
-    // A. Mark the handoff closed. The handoffs table is the authority for
-    // summary/done/todo/blocked — we no longer flatten those fields into a
-    // single foundation log row (that produced unsearchable multi-KB blobs).
-    db.prepare(
-      "UPDATE handoffs SET status = 'closed', closed_at = ? WHERE id = ?"
-    ).run(ts, row.id);
-
-    // B. Demote session detail entries to fleeting (compaction-eligible).
-    const entryIds = JSON.parse(row.session_entries || '[]');
-    if (entryIds.length > 0) {
-      const placeholders = entryIds.map(() => '?').join(',');
-      db.prepare(
-        `UPDATE logs SET tier = 'fleeting' WHERE id IN (${placeholders}) AND tier = 'detail'`
-      ).run(...entryIds);
-    }
-
-    // C. Re-materialize handoffs.md at item granularity so each done/todo/
+    // Re-materialize handoffs.md at item granularity so each done/todo/
     // blocked item is its own searchable block.
     materializeHandoffsMd(pebblDir, db);
 
-    // D. Display result
     console.log(`Handoff #${row.id} closed.`);
-    if (entryIds.length > 0) {
-      console.log(`${entryIds.length} session entries marked for compaction.`);
+    if (demoted > 0) {
+      console.log(`${demoted} session entries marked for compaction.`);
     }
     return;
   }
@@ -234,14 +222,28 @@ module.exports = function handoff(args) {
   // of a step taken some of the time; --no-doc is the escape hatch so a legitimately
   // long-but-terse handoff is never forced to TRUNCATE its own content to get under
   // the bar (the failure mode a hard, hatch-less block would create).
+  // handoff.docs in config.yml picks the rule (the same setting renders the
+  // AGENTS.md block, so the agent is told what will be enforced):
+  //   when-heavy (default) — past the threshold, --docs or --no-doc;
+  //   never  — no doc required, ever (the repo keeps handoffs to one-liners);
+  //   always — every handoff links a doc or says --no-doc.
+  const { docs: docsMode, docsDir } = handoffSettings(loadConfig(pebblDir));
   const detailChars = (done || '').length + (todo || '').length + (blocked || '').length;
-  if (detailChars > DETAIL_DOC_THRESHOLD && !docs && !flags['no-doc']) {
+  if (docsMode === 'always' && !docs && !flags['no-doc']) {
+    console.error(
+      `pebbl: this repo links a doc on every handoff (handoff.docs: always in .pebbl/config.yml).\n` +
+      `  • write the detail to a file and link it:   --docs ${docsDir}/<topic>.md\n` +
+      `  • or record this one without a doc:         --no-doc`
+    );
+    process.exit(1);
+  }
+  if (docsMode === 'when-heavy' && detailChars > DETAIL_DOC_THRESHOLD && !docs && !flags['no-doc']) {
     console.error(
       `pebbl: this handoff carries ${detailChars} chars of detail across done/todo/blocked ` +
       `but links no rendered doc.\n` +
       `Detail-heavy context belongs in a readable document the next agent can open — not ` +
       `crammed into the searchable fields. Either:\n` +
-      `  • write the detail to a file and link it:   --docs docs/handoffs/<topic>.md\n` +
+      `  • write the detail to a file and link it:   --docs ${docsDir}/<topic>.md\n` +
       `  • or record a terse handoff anyway:          --no-doc\n` +
       `(threshold ${DETAIL_DOC_THRESHOLD} chars. A linked doc travels with the repo and ` +
       `resurfaces on \`pebbl context\` / \`pebbl handoff --latest\`.)`
@@ -274,11 +276,32 @@ module.exports = function handoff(args) {
     // no git or no commits
   }
 
+  // SUPERSEDE: a new handoff closes every earlier open one (not only same-topic
+  // ones — Mobile-Home-Parks' four stacked opens each had a different park
+  // topic). Their todos that this handoff lists in neither --done nor --todo
+  // carry into it as "from #N: ...", so nothing open is lost by closing them.
+  // --keep-open is the opt-out for a genuinely parallel thread. Carried items
+  // are added AFTER the detail-doc guard so inherited todos can't trip it.
+  const priors = flags['keep-open']
+    ? []
+    : db.prepare("SELECT * FROM handoffs WHERE status = 'open' ORDER BY id ASC").all();
+  const carried = carriedTodos(priors, [done, todo]);
+  if (carried.length > 0) todo = joinField([todo, ...carried].filter(Boolean));
+
   // Insert the handoff
   const result = db.prepare(`
     INSERT INTO handoffs (timestamp, summary, done, todo, blocked, topics, source, session_entries, session_commits, status, docs)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
   `).run(ts, summary, done, todo, blocked, topics, source, JSON.stringify(sessionEntries), JSON.stringify(sessionCommits), docs);
+
+  const events = [makeHandoffOpenEvent(pebblDir, { ts, summary, done, todo, blocked, topics, source, docs })];
+  const closed = [];
+  for (const prior of priors) {
+    const { closeEvent } = closeHandoffRow(db, pebblDir, prior, ts);
+    if (closeEvent) events.push(closeEvent);
+    closed.push(prior.id);
+  }
+  appendHandoffEvents(pebblDir, events);
 
   // Re-materialize so the new (open) handoff is searchable immediately.
   materializeHandoffsMd(pebblDir, db);
@@ -291,14 +314,90 @@ module.exports = function handoff(args) {
   if (blocked) console.log(`Blocked: ${blocked}`);
   if (topics) console.log(`Topics: ${topics}`);
   console.log(`Session: ${sessionEntries.length} log entries, ${sessionCommits.length} commits captured`);
+  if (closed.length > 0) {
+    console.log(`Closed earlier handoff${closed.length === 1 ? '' : 's'}: ${closed.map((id) => `#${id}`).join(', ')}`);
+  }
+  if (carried.length > 0) {
+    console.log(`Carried ${carried.length} unfinished todo${carried.length === 1 ? '' : 's'} into this one:`);
+    for (const c of carried) console.log(`  - ${c}`);
+    console.log('  (list finished ones in --done next time and they stop carrying)');
+  }
   console.log('──');
-  // Close-lifecycle reminder: creating a handoff never closes priors, so opens
-  // stack silently. Nudge the author to drain finished work out of order.
-  console.log(
-    `  → this stays open until closed: pebbl handoff --close ${result.lastInsertRowid} ` +
-    `(see all open: pebbl handoff --list-open)`
-  );
+  if (flags['keep-open']) {
+    console.log('  → --keep-open: earlier open handoffs were left open (pebbl handoff --list-open)');
+  }
 };
+
+// Close one handoff row: mark it closed and demote its session detail entries
+// to fleeting (compaction-eligible). Shared by --close and by a new handoff
+// superseding earlier opens, so both close the same way. Returns the number of
+// entries demoted and the handoff-close event to append (null when the handoff
+// predates handoff events, so the fold has nothing to close).
+function closeHandoffRow(db, pebblDir, row, ts) {
+  // The handoffs table is the authority for summary/done/todo/blocked — we no
+  // longer flatten those fields into a single foundation log row (that produced
+  // unsearchable multi-KB blobs).
+  db.prepare(
+    "UPDATE handoffs SET status = 'closed', closed_at = ? WHERE id = ?"
+  ).run(ts, row.id);
+
+  const entryIds = JSON.parse(row.session_entries || '[]');
+  if (entryIds.length > 0) {
+    const placeholders = entryIds.map(() => '?').join(',');
+    db.prepare(
+      `UPDATE logs SET tier = 'fleeting' WHERE id IN (${placeholders}) AND tier = 'detail'`
+    ).run(...entryIds);
+  }
+
+  let closeEvent = null;
+  try {
+    const eid = findHandoffOpenEid(pebblDir, row);
+    if (eid) closeEvent = makeHandoffCloseEvent(pebblDir, { ts, handoff: eid });
+  } catch {
+    // unreadable events log: db.sqlite already holds the close
+  }
+  return { demoted: entryIds.length, closeEvent };
+}
+
+// Append handoff events so a shared / events-mode store keeps its handoffs on
+// rebuild. Best-effort: db.sqlite is already written (and is canonical in a
+// legacy store), so a failed append warns instead of failing the handoff.
+function appendHandoffEvents(pebblDir, events) {
+  if (events.length === 0) return;
+  try {
+    appendEventBatch(pebblDir, events);
+  } catch (err) {
+    console.error(`pebbl: handoff saved, but events.jsonl append failed (${err.message}) — run pebbl doctor`);
+  }
+}
+
+// Todos from earlier open handoffs that the new handoff doesn't account for,
+// each as "from #N: item" (N = the handoff the item FIRST appeared in, so an
+// item carried twice keeps its origin). An item counts as accounted for when
+// the new --done or --todo has an item equal to it, or containing it, after
+// normalizing case and punctuation. Duplicates across priors carry once.
+const CARRIED_RE = /^from #(\d+):\s*/i;
+function normItem(s) {
+  return String(s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+function carriedTodos(priors, newFields) {
+  const listed = newFields.flatMap((f) => splitItems(f)).map((i) => normItem(i.replace(CARRIED_RE, '')));
+  const covered = (n) => listed.some((l) => l === n || (n.length >= 8 && l.includes(n)) || (l.length >= 8 && n.includes(l)));
+  const out = [];
+  const seen = new Set();
+  for (const prior of priors) {
+    for (const item of splitItems(prior.todo)) {
+      const m = CARRIED_RE.exec(item);
+      const origin = m ? m[1] : String(prior.id);
+      const base = item.replace(CARRIED_RE, '');
+      const n = normItem(base);
+      if (!n || covered(n) || seen.has(n)) continue;
+      seen.add(n);
+      out.push(`from #${origin}: ${base}`);
+    }
+  }
+  return out;
+}
 
 // Well-formedness check for a handoff summary. Returns a SHORT reason string
 // when the summary is malformed (so create can reject it), or null when it is
@@ -345,11 +444,6 @@ function joinField(value) {
   return joined || null;
 }
 
-// Split a handoff field into atomic items on ';'.
-function splitItems(field) {
-  if (!field) return [];
-  return field.split(';').map(s => s.trim()).filter(Boolean);
-}
 
 // Warn (non-fatal) when a field is long but has no separators, so it would
 // materialize as a single unsearchable block.
@@ -405,15 +499,15 @@ function displayHandoff(row, db) {
 
   if (row.done) {
     console.log('\nDone:');
-    row.done.split(';').map(s => s.trim()).filter(Boolean).forEach(item => console.log(`  - ${item}`));
+    splitItems(row.done).forEach(item => console.log(`  - ${item}`));
   }
   if (row.todo) {
     console.log('\nTodo:');
-    row.todo.split(';').map(s => s.trim()).filter(Boolean).forEach(item => console.log(`  - ${item}`));
+    splitItems(row.todo).forEach(item => console.log(`  - ${item}`));
   }
   if (row.blocked) {
     console.log('\nBlocked:');
-    row.blocked.split(';').map(s => s.trim()).filter(Boolean).forEach(item => console.log(`  - ${item}`));
+    splitItems(row.blocked).forEach(item => console.log(`  - ${item}`));
   }
 
   // Show referenced docs sorted by freshness
@@ -471,3 +565,4 @@ module.exports.joinField = joinField;
 module.exports.checkFieldQuality = checkFieldQuality;
 module.exports.materializeHandoffsMd = materializeHandoffsMd;
 module.exports.malformedSummary = malformedSummary;
+module.exports.carriedTodos = carriedTodos;

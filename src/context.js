@@ -9,6 +9,7 @@ const { rankCandidates } = require('./rank');
 const { buildGroups } = require('./compact');
 const { loadConfig, ensureProjectFiles } = require('./rubric');
 const { displayEntry } = require('./log');
+const { splitItems } = require('./items');
 const { isThinEntry } = require('./detect-thin');
 const { readNarrative, readRefs, readUpdatedTimestamp, updateRefs } = require('./narrative');
 const { mirrorMachines, mirrorLogs, mirrorHandoffs, stripHandoffPrefix } = require('./mirror');
@@ -179,7 +180,7 @@ function showRecentHandoffs(db) {
   for (const row of rows) {
     const date = relativeDate(row.closed_at || row.timestamp);
     console.log(`  #${row.id} (${date}) ${trunc(row.summary, 90)}`);
-    const todos = (row.todo || '').split(';').map(s => s.trim()).filter(Boolean);
+    const todos = splitItems(row.todo);
     todos.slice(0, 2).forEach(t => console.log(`    todo: ${trunc(t, 90)}`));
     if (todos.length > 2) console.log(`    … +${todos.length - 2} more todo (pebbl handoff --latest)`);
   }

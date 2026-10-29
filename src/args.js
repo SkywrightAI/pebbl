@@ -20,9 +20,10 @@ const KNOWN_FLAGS = new Set([
   // undoes one, `--list-accepted` prints the ledger. Registering them here is
   // what keeps parseArgs from demoting them to positional text.
   'accept', 'revoke', 'reason', 'list-accepted',
+  'keep-open', // handoff: don't close earlier open handoffs
 ]);
 
-const BOOLEAN_FLAGS = new Set(['preview', 'execute', 'latest', 'list', 'close', 'open', 'list-open', 'show', 'generate', 'include-archive', 'deep', 'refresh', 'share', 'json', 'all', 'strict', 'metrics', 'no-doc', 'list-accepted']);
+const BOOLEAN_FLAGS = new Set(['preview', 'execute', 'latest', 'list', 'close', 'open', 'list-open', 'show', 'generate', 'include-archive', 'deep', 'refresh', 'share', 'json', 'all', 'strict', 'metrics', 'no-doc', 'list-accepted', 'keep-open']);
 
 // Flags that may legitimately be given more than once. A repeat ACCUMULATES
 // into an array instead of overwriting — the old behavior silently kept only the
