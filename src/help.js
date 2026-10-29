@@ -93,6 +93,23 @@ points you at \`--corrects\` so you can supersede a wrong entry yourself.
 Flags:
   --deep    also grep the repo for backtick-wrapped symbols (slower, opt-in)
 `,
+  'check-session': `pebbl check-session — Claude Code Stop hook: hold a turn whose work isn't logged
+
+Installed by \`pebbl init\` / \`pebbl upgrade\` into .claude/settings.local.json.
+Reads the hook JSON on stdin and prints {"decision":"block","reason":...} when:
+  - files changed (a commit since the session started, or a dirty file modified
+    since then, outside .pebbl/) after the newest pebbl entry or handoff;
+    commit captures from the git hook don't count as logging;
+  - (opt-in) a numbered decision was added to session_check.decisions_file
+    since session_check.decisions_base with no entry citing "decision N".
+Holds a turn once (stop_hook_active passes). Always exits 0.
+
+config.yml:
+  session_check:
+    decisions_file: "docs/10.01 Decisions.md"
+    decision_pattern: '^(\\d+)\\.\\s'     (default)
+    decisions_base: origin/main             (default)
+`,
   doctor: `pebbl doctor — report-only memory-health check (memory vs memory)
 
 Surfaces CURRENT beliefs that are probably wrong so you can correct them,
@@ -154,8 +171,17 @@ For a doc that must QUOTE a leak example (this scanner's own spec did), put
 `,
   init: `pebbl init — set up .pebbl/ in current project
 
-Creates .pebbl/ with sqlite store, writes PEBBL.md at project root,
-and adds a pebbl block (sentinel-marked) to AGENTS.md if present.
+Creates .pebbl/ with sqlite store, config.yml and rubric.yml; installs the git
+hooks (commit capture, rebuild sentinel, privacy scan) pinned to this pebbl and
+node; adds the pebbl block (sentinel-marked, rendered from config.yml) to
+AGENTS.md; adds @AGENTS.md to an existing CLAUDE.md; installs the
+check-session Stop hook in .claude/settings.local.json; seeds an empty
+narrative from README.md.
+
+Flags:
+  --shared                commit events.jsonl (shared memory)
+  --allow-public-memory   allow --shared on a public remote (history must be clean)
+  --no-claude-hooks       skip the Claude Code Stop hook
 `,
 
   log: `pebbl log "[message]" — record a decision or note
@@ -377,13 +403,20 @@ Flags:
   --close [id]         close an open handoff (a specific id if given);
                        session detail entries become compaction-eligible;
                        done/todo/blocked stay searchable in handoffs.md
+  --keep-open          don't close earlier open handoffs (a parallel thread)
 
-Handoffs materialize one block per --done/--todo/--blocked item into
-handoffs.md so each item is independently searchable.
+A new handoff closes every earlier open one. Their todos that the new handoff
+lists in neither --done nor --todo carry over as "from #N: ...".
 
-A DETAIL-HEAVY handoff (a lot of done/todo/blocked text) must link a rendered
-doc with --docs — a readable document beats detail crammed into the fields, and
-a linked doc can't be orphaned. Pass --no-doc to record a terse handoff anyway.
+Items split on top-level ';' (a ';' inside parentheses stays in its item), or
+repeat --done/--todo once per item. Each item materializes as its own block in
+handoffs.md so it is independently searchable.
+
+When a handoff must link a doc is set by handoff.docs in config.yml:
+  when-heavy (default)  a long handoff needs --docs or --no-doc
+  never                 no doc required
+  always                every handoff needs --docs or --no-doc
+handoff.docs_dir (default docs/handoffs) is where the AGENTS.md block says docs go.
 `,
 
   narrative: `pebbl narrative — view or set the project narrative
@@ -426,8 +459,13 @@ Flags:
 
   upgrade: `pebbl upgrade — update .pebbl/ to the latest version
 
-Auto-migrates the AGENTS.md pebbl block to the current sentinel format
-and overwrites PEBBL.md at project root.
+Re-renders the AGENTS.md pebbl block from config.yml, reinstalls all five git
+hooks (re-pinned to this pebbl and node), adds @AGENTS.md to CLAUDE.md, and
+refreshes the check-session Stop hook. Run it after cloning a repo (hooks
+don't travel with git) or after changing handoff settings.
+
+Flags:
+  --no-claude-hooks       skip the Claude Code Stop hook
 `,
 
   eject: `pebbl eject — remove pebbl config from this project

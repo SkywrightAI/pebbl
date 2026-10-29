@@ -3,16 +3,18 @@ const fs = require('fs');
 const path = require('path');
 const { openDb } = require('./db');
 const { requirePebblDir } = require('./find-pebbl');
-const { ensureProjectFiles, DEFAULT_RUBRIC, DEFAULT_CONFIG } = require('./rubric');
+const { ensureProjectFiles, DEFAULT_RUBRIC, DEFAULT_CONFIG, loadConfig } = require('./rubric');
+const { installGitHooks, installClaudeStopHook, ensureClaudeImport } = require('./hooks');
 
-// The post-commit hook template now lives in ONE place — src/init.js
-// (postCommitHook). `pebbl upgrade` rewrites the hook from that same function so
-// re-init and upgrade can never drift (DRY). It's required lazily inside
-// upgrade() to avoid a require cycle with init.js.
+// Hook templates live in ONE place — src/hooks.js — so re-init and upgrade
+// install identical hooks. init.js (the AGENTS block renderer) is required
+// lazily inside upgradeAgentsMd to avoid a require cycle.
 
-function upgradeAgentsMd(cwd) {
+function upgradeAgentsMd(cwd, config) {
   const agentMd = path.join(cwd, 'AGENTS.md');
-  const { AGENT_SECTION, AGENT_BEGIN, AGENT_END } = require('./init');
+  const { renderAgentSection, AGENT_BEGIN, AGENT_END } = require('./init');
+  // Rendered from this store's config.yml (handoff.docs / handoff.docs_dir).
+  const AGENT_SECTION = renderAgentSection(config);
 
   if (!fs.existsSync(agentMd)) {
     console.log('AGENTS.md not found — run pebbl init first');
@@ -84,7 +86,8 @@ function mergeRubric(pebblDir) {
   console.log('rubric.yml: appended 1 new rule');
 }
 
-module.exports = function upgrade() {
+module.exports = function upgrade(argv) {
+  const args = Array.isArray(argv) ? argv : [];
   const cwd = process.cwd();
   const pebblDir = requirePebblDir();
 
@@ -101,20 +104,15 @@ module.exports = function upgrade() {
     console.log('Created config.yml');
   }
 
-  const gitDir = path.join(cwd, '.git');
-  if (fs.existsSync(gitDir)) {
-    const hookPath = path.join(gitDir, 'hooks', 'post-commit');
-    // Reuse init's pinned template (lazy require avoids an init<->upgrade cycle),
-    // pinning THIS pebbl's bin so the upgraded hook runs the installed code (with
-    // the embed bypass + background), not a stale `pebbl` first on $PATH.
-    const { postCommitHook } = require('./init');
-    const pinnedBin = path.resolve(__dirname, '..', 'bin', 'pebbl.js');
-    fs.writeFileSync(hookPath, postCommitHook(pinnedBin), { mode: 0o755 });
-    fs.chmodSync(hookPath, 0o755); // mode only applies on create; force +x on rewrite
-    console.log('Updated post-commit hook');
-  }
+  // All five git hooks, re-pinned to this pebbl + node. Upgrade used to
+  // rewrite only post-commit, so a repo re-cloned without hooks got commit
+  // capture back but not the privacy scan or the rebuild sentinel.
+  installGitHooks(cwd);
 
-  upgradeAgentsMd(cwd);
+  upgradeAgentsMd(cwd, loadConfig(pebblDir));
+  ensureClaudeImport(cwd);
+  require('./init').seedNarrative(pebblDir, cwd);
+  if (!args.includes('--no-claude-hooks')) installClaudeStopHook(cwd);
   removeLegacyPebblMd(cwd);
 
   console.log('\npebbl upgrade complete.');

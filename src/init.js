@@ -3,7 +3,10 @@ const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const { openDb } = require('./db');
-const { DEFAULT_RUBRIC, DEFAULT_CONFIG } = require('./rubric');
+const { DEFAULT_RUBRIC, DEFAULT_CONFIG, loadConfig, handoffSettings } = require('./rubric');
+const hooks = require('./hooks');
+const { installGitHooks, installClaudeStopHook, ensureClaudeImport } = hooks;
+const { readNarrative, writeNarrative } = require('./narrative');
 const { detectRemoteVisibility } = require('./privacy-scan');
 // DRY: the positive completeness marker name is owned by store-mode.js (its
 // reader); shared init writes it so storeMode() classifies a fresh shared store
@@ -13,125 +16,57 @@ const { EVENTS_CANONICAL_MARKER } = require('./store-mode');
 const AGENT_BEGIN = '<!-- pebbl:begin -->';
 const AGENT_END = '<!-- pebbl:end -->';
 
-const AGENT_SECTION = `
+// The AGENTS.md block is RENDERED from .pebbl/config.yml (`handoff.docs`,
+// `handoff.docs_dir`) so it says what this repo actually wants. Before, the
+// block was one fixed text and a repo with a different handoff style had to
+// override it in CLAUDE.md (Mobile-Home-Parks: "This overrides the
+// detail-heavy handoff paragraph in AGENTS.md").
+function docsParagraph({ docs, docsDir }) {
+  if (docs === 'never') {
+    return 'Keep handoff items to one line each that point at where the detail lives. Don\'t write a handoff doc unless the owner asks for one.';
+  }
+  if (docs === 'always') {
+    return `Write the session's detail to a doc in \`${docsDir}/\` and link it with \`--docs <path>\`. pebbl refuses a handoff without \`--docs\` (or an explicit \`--no-doc\`).`;
+  }
+  return `If the detail runs long, write it to a doc in \`${docsDir}/\` and link it with \`--docs <path>\`; the fields stay one-liners. pebbl refuses a long handoff that has neither \`--docs\` nor \`--no-doc\`.`;
+}
+
+function renderAgentSection(config) {
+  return `
 ${AGENT_BEGIN}
 ## Pebbl — Memory
 
-Local CLI for project memory. Flag details: \`pebbl <cmd> --help\`. Concepts: \`pebbl help <topic>\` (categories, tiers, compaction, file-layout, entry-ids).
+pebbl is this project's memory: an index of decisions, dead ends and handoffs, not a place for documents. Flags: \`pebbl <cmd> --help\`. Concepts: \`pebbl help <topic>\` (categories, tiers, compaction).
 
-**Every session, before code:** \`pebbl context\` (read open handoff + recent decisions). An open handoff's \`done\` field is what the *previous* agent finished — don't claim it as your own. The \`todo\` field is what's left for you. Close the handoff with \`pebbl handoff --close\` when you complete the remaining work.
+**Start of every session:** run \`pebbl context\`. An open handoff's \`done\` is what the previous session finished, not you; its \`todo\` is what's left.
 
-**Before any non-trivial decision:** \`pebbl search "<area>"\` — don't re-litigate prior choices.
+**Before a non-trivial choice:** \`pebbl search "<area>"\`, so you don't re-litigate a settled decision.
 
-**Log the moment a decision or failed approach lands.** Always include \`--cat\` and \`--topic\`. Always explain *why*, not just *what* — entries without rationale get auto-demoted.
+**Log the moment a choice is made or an approach fails**, one line: what, why, and where the detail lives (a doc, a file, a PR). Always pass \`--cat\` and \`--topic\`.
 
 \`\`\`bash
-pebbl log "chose bcrypt over argon2 because team already operates bcrypt in prod" --cat decision --topic auth
+pebbl log "nightly import moved to 2am because the 1am run overlapped backups (see docs/ops.md)" --cat decision --topic import
 \`\`\`
 
-**End of session:** \`pebbl handoff "<summary>" --done "a; b" --todo "c; d" --topic <area>\`. Use \`;\` to split atomic items — one run-on becomes one unsearchable blob.
+\`--cat\`: \`decision\` a choice and why · \`steering\` a dead end, what to do instead · \`pattern\` a convention · \`structure\` where things live · \`integration\` an outside system · \`quality\` a target or measurement.
 
-**A detail-heavy handoff needs a rendered doc.** When the end-of-session detail is large, write it to a readable file (e.g. \`docs/handoffs/<topic>.md\`) and link it with \`--docs <path>\` — the fields are for searchable one-liners, the doc is the readable detail. pebbl REFUSES a detail-heavy handoff that links neither \`--docs\` nor \`--no-doc\`, so the rendered doc reliably gets made instead of the detail being crammed into the fields or written somewhere and never linked. The linked doc resurfaces on \`pebbl context\`.
+**End of every session:** \`pebbl handoff "<one line>" --done "a; b" --todo "c; d" --topic <area>\`. One item per \`;\`, or repeat \`--done\` / \`--todo\` once per item. A new handoff closes the previous one: put its finished items in \`--done\` and open ones in \`--todo\`; any of its todos you list in neither carry over. Pass \`--keep-open\` only if another session is still working on it.
 
-**Don't log:** routine code changes (the git hook captures commits), or anything obvious from reading the code.
+${docsParagraph(handoffSettings(config))}
+
+If a Stop hook holds your turn for unlogged changes, log what's missing, or say nothing this turn was worth keeping.
+
+**Don't log** routine code changes (the commit hook captures commits) or anything obvious from reading the code.
 ${AGENT_END}
-`;
-
-const AGENT_STANDALONE = `# Agent Guidelines\n${AGENT_SECTION}`;
-
-// post-commit hook. Captures the commit into pebbl memory: `pebbl log-commit`
-// writes the commit + log rows and appends commit-log.md so the commit is
-// searchable.
-//
-// PINNING (same pattern as the P5 hooks below): the hook bakes in the ABSOLUTE
-// path of the bin/pebbl.js that ran `init`, invoked via `node`, so it ALWAYS runs
-// the pebbl that installed it — not whatever `pebbl` is first on $PATH. Falls back
-// to a PATH `pebbl` only if the pinned bin is gone. Keep this template in sync
-// with src/upgrade.js.
-function postCommitHook(pinnedBin) {
-  const pin = String(pinnedBin).replace(/'/g, `'\\''`); // shell-safe single-quote
-  return `#!/bin/sh
-# pebbl post-commit: capture the commit into pebbl memory.
-HASH=$(git log -1 --pretty=%H)
-MESSAGE=$(git log -1 --pretty=%B)
-FILES=$(git diff-tree --no-commit-id -r --name-only HEAD | tr '\\n' ',')
-# Pin the pebbl that installed this hook so commit-capture runs the INSTALLED
-# code's log-commit, not a stale \`pebbl\` first on \$PATH.
-PINNED='${pin}'
-if [ -n "$PINNED" ] && [ -f "$PINNED" ]; then
-  exec node "$PINNED" log-commit "$HASH" "$MESSAGE" "$FILES"
-fi
-pebbl log-commit "$HASH" "$MESSAGE" "$FILES"
 `;
 }
 
-// Backward-compatible unpinned template (no installing-bin path baked in). Kept
-// for callers/tests that reference HOOK_SCRIPT directly; the INSTALLED hook uses
-// the pinned postCommitHook() above.
-const HOOK_SCRIPT = postCommitHook('');
+// Default-config rendering, kept as a constant for callers that predate the
+// renderer (and for a store with no config.yml).
+const AGENT_SECTION = renderAgentSection({});
 
-// P4 — post-merge / post-checkout rebuild trigger. A `git merge` or
-// `git checkout` can pull NEW events.jsonl lines into the store (the whole
-// point of committed, shared memory), but the view (view.sqlite + markdown) is
-// derived and gitignored, so it would be stale until something rebuilt it.
-// These hooks DO NOT fold inline — folding the whole log inside a git hook
-// would make every pull/checkout slow and could block on the lock. They only
-// TOUCH a sentinel; the actual rebuild is LAZY, done by the staleness check
-// (src/staleness.js, wired into openDb) on the very next pebbl command. The
-// sentinel is a cheap, idempotent marker that a rebuild is due. mkdir -p guards
-// the case where .pebbl/ isn't present in the checked-out tree yet.
-const REBUILD_HOOK_SCRIPT = `#!/bin/sh
-# pebbl P4: mark the view stale after a merge/checkout pulled new events.
-# The rebuild itself is lazy — it happens on the next \`pebbl\` command, never
-# here (folding inline would make every pull/checkout slow).
-ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
-[ -d "$ROOT/.pebbl" ] || exit 0
-: > "$ROOT/.pebbl/.rebuild-needed" 2>/dev/null || true
-exit 0
-`;
-
-// P5 — the pre-commit / pre-push secret-scan hooks. The forward gate (design
-// Privacy line 41: "scan in git PRE-COMMIT and PRE-PUSH on every commit, not
-// one-shot at init"). The hook shells into THIS pebbl's `privacy-scan` and exits
-// non-zero on a hit, refusing the commit/push.
-//
-// Pebbl RESOLUTION is the subtle part. We bake in the ABSOLUTE path of the
-// bin/pebbl.js that ran `init` (resolved below), invoked via `node`, so the hook
-// always calls the exact pebbl that installed it — independent of $PATH. That
-// matters because a DIFFERENT pebbl might be first on $PATH (e.g. a globally
-// installed build that predates the `privacy-scan` command); calling it would
-// error "unknown command" and wrongly BLOCK every commit. So:
-//   1. the pinned `node <installing-bin> privacy-scan` if that bin still exists,
-//   2. else a repo-local node_modules/.bin/pebbl,
-//   3. else a PATH `pebbl` ONLY IF it understands `privacy-scan` (probed),
-//   4. else exit 0 (allow) — a hook that hard-fails on a missing/old binary
-//      would block every commit and get deleted; audit-history is the backstop.
-// PEBBL_SKIP_SCAN=1 is an explicit operator escape hatch.
-function hookScript(mode, pinnedBin) {
-  // mode: '--staged' (pre-commit) or '--push' (pre-push).
-  const human = mode === '--push'
-    ? 'pre-push secret/PII scan + public-repo hard gate. A PUBLIC remote blocks the\n# push until `pebbl audit-history` is clean (clears once clean; re-applies on a\n# once-private remote going public).'
-    : 'pre-commit secret/PII scan. Refuses a commit that would write a non-RFC1918\n# IP+port, a credential file path, a token shape, or a denylisted name into\n# shared, append-only memory (which can never un-leak it).';
-  // pinnedBin is embedded as a shell-safe single-quoted literal.
-  const pin = String(pinnedBin).replace(/'/g, `'\\''`);
-  return `#!/bin/sh
-# pebbl P5: ${human}
-[ -n "$PEBBL_SKIP_SCAN" ] && exit 0
-PINNED='${pin}'
-if [ -n "$PINNED" ] && [ -f "$PINNED" ]; then
-  exec node "$PINNED" privacy-scan ${mode}
-fi
-ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
-if [ -x "$ROOT/node_modules/.bin/pebbl" ]; then
-  exec "$ROOT/node_modules/.bin/pebbl" privacy-scan ${mode}
-fi
-# A PATH pebbl is used ONLY if it understands privacy-scan (an older global
-# build that doesn't would otherwise hard-block every commit).
-if command -v pebbl >/dev/null 2>&1 && pebbl help privacy-scan >/dev/null 2>&1; then
-  exec pebbl privacy-scan ${mode}
-fi
-exit 0
-`;
+function agentStandalone(config) {
+  return `# Agent Guidelines\n${renderAgentSection(config)}`;
 }
 
 // Wire 1 — the public-remote hard gate for `--shared`. Committing events.jsonl
@@ -265,38 +200,8 @@ function init(argv) {
   openDb(pebblDir);
   console.log('Initialized db.sqlite');
 
-  // Git hooks
-  const gitDir = path.join(cwd, '.git');
-  if (fs.existsSync(gitDir)) {
-    const hooksDir = path.join(gitDir, 'hooks');
-    fs.mkdirSync(hooksDir, { recursive: true });
-    // writeFileSync's `mode` only applies on CREATE — an existing hook keeps its
-    // old mode — so chmod explicitly after writing to guarantee +x on re-init.
-    const writeHook = (name, body) => {
-      const p = path.join(hooksDir, name);
-      fs.writeFileSync(p, body, { mode: 0o755 });
-      fs.chmodSync(p, 0o755);
-    };
-    // Absolute path of THIS bin/pebbl.js — pinned into the hooks so they run the
-    // pebbl that installed them, not whatever `pebbl` is first on $PATH (used by
-    // both the post-commit and the P5 pre-commit/pre-push hooks below).
-    const pinnedBin = path.resolve(__dirname, '..', 'bin', 'pebbl.js');
-    writeHook('post-commit', postCommitHook(pinnedBin));
-    console.log('Installed post-commit hook');
-    // P4: post-merge + post-checkout mark the view stale (sentinel touch only);
-    // the rebuild is lazy on the next pebbl command, never inside the hook.
-    writeHook('post-merge', REBUILD_HOOK_SCRIPT);
-    writeHook('post-checkout', REBUILD_HOOK_SCRIPT);
-    console.log('Installed post-merge and post-checkout rebuild hooks');
-    // P5: pre-commit + pre-push secret/PII scanner, installed ADDITIVELY
-    // alongside the hooks above (a forward gate runs on every commit/push, not
-    // one-shot at init). These do NOT replace the post-* hooks. They reuse the
-    // same pinnedBin computed above so they always run the pebbl that installed
-    // them, not whatever pebbl happens to be first on $PATH.
-    writeHook('pre-commit', hookScript('--staged', pinnedBin));
-    writeHook('pre-push', hookScript('--push', pinnedBin));
-    console.log('Installed pre-commit and pre-push privacy-scan hooks');
-  } else {
+  // Git hooks (all five, pinned to this pebbl + node — src/hooks.js).
+  if (!installGitHooks(cwd)) {
     console.log('No .git/ found — skipping git hooks (run inside a git repo to enable).');
   }
 
@@ -427,41 +332,104 @@ function init(argv) {
   // AGENTS.md — create or append, never overwrite user content outside the sentinels
   const agentMd = path.join(cwd, 'AGENTS.md');
   if (!fs.existsSync(agentMd)) {
-    fs.writeFileSync(agentMd, AGENT_STANDALONE);
+    fs.writeFileSync(agentMd, agentStandalone(loadConfig(pebblDir)));
     console.log('Created AGENTS.md with pebbl guidance');
   } else {
     const existing = fs.readFileSync(agentMd, 'utf8');
     const hasNewBlock = existing.includes(AGENT_BEGIN);
     const hasOldBlock = existing.includes('Pebbl — Project Memory Protocol');
     if (!hasNewBlock && !hasOldBlock) {
-      fs.appendFileSync(agentMd, AGENT_SECTION);
+      fs.appendFileSync(agentMd, renderAgentSection(loadConfig(pebblDir)));
       console.log('Appended pebbl guidance to existing AGENTS.md');
     } else {
       console.log('AGENTS.md already contains pebbl guidance — run `pebbl upgrade` to refresh');
     }
   }
 
-  // Create empty narrative.md placeholder
+  // Claude Code reads CLAUDE.md, not AGENTS.md: import it when a CLAUDE.md exists.
+  ensureClaudeImport(cwd);
+
+  // Stop hook: holds a turn that changed files without logging (check-session).
+  if (!args.includes('--no-claude-hooks')) {
+    installClaudeStopHook(cwd);
+  }
+
+  // Narrative. An empty placeholder is what most stores were left with (the
+  // printed "set one with" hint was easy to skip), so seed it from README's
+  // first paragraph when there is one and say so; the agent corrects it later.
   const narrativePath = path.join(pebblDir, 'narrative.md');
   if (!fs.existsSync(narrativePath)) {
     fs.writeFileSync(narrativePath, '# Project Narrative\n');
   }
-
   console.log('');
-  console.log('This project needs a narrative — a short description of what');
-  console.log('it does and key architectural context. This helps agents');
-  console.log('understand the project without reading all decisions.');
-  console.log('');
-  console.log('Set one with:  pebbl narrative "Your description here"');
+  const seeded = seedNarrative(pebblDir, cwd);
+  if (seeded === null) {
+    console.log('Narrative already set (pebbl narrative to change it).');
+  } else if (!seeded) {
+    console.log('This project needs a narrative — a short description of what');
+    console.log('it does and key architectural context. This helps agents');
+    console.log('understand the project without reading all decisions.');
+    console.log('');
+    console.log('Set one with:  pebbl narrative "Your description here"');
+  }
 
   console.log('\npebbl ready. Run `pebbl log "[your first note]"` to start stacking.');
 }
 
+// Seed an EMPTY narrative from README. Returns null when one is already set,
+// the seeded text when it wrote one, '' when README had nothing usable. Used by
+// init and by upgrade (existing stores were mostly left with the placeholder).
+function seedNarrative(pebblDir, cwd, log = console.log) {
+  if (readNarrative(pebblDir)) return null;
+  const seeded = readmeNarrative(cwd);
+  if (!seeded) return '';
+  writeNarrative(pebblDir, seeded, []);
+  log('Seeded the narrative from README.md:');
+  log(`  ${seeded}`);
+  log('Correct it with:  pebbl narrative "Your description here"');
+  return seeded;
+}
+
+// First prose paragraph of the project README, flattened to one line, or null.
+// Skips headings, badges, HTML and code fences; strips link/emphasis markup.
+const NARRATIVE_SEED_MAX = 600;
+function readmeNarrative(cwd) {
+  const file = ['README.md', 'README', 'readme.md'].map((f) => path.join(cwd, f)).find((f) => fs.existsSync(f));
+  if (!file) return null;
+  const para = [];
+  let inFence = false;
+  for (const raw of fs.readFileSync(file, 'utf8').split('\n')) {
+    const line = raw.trim();
+    if (line.startsWith('```')) { inFence = !inFence; if (para.length) break; continue; }
+    if (inFence) continue;
+    const skip = line === '' || /^(#|!\[|\[!\[|<|>|---|\||- |\* |\d+\. )/.test(line);
+    if (skip) {
+      if (para.length) break;
+      continue;
+    }
+    para.push(line);
+  }
+  if (para.length === 0) return null;
+  let text = para.join(' ')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/(\*\*|__|\*|_)(\S[^*_]*?)\1/g, '$2')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (text.length < 20) return null;
+  if (text.length > NARRATIVE_SEED_MAX) text = text.slice(0, NARRATIVE_SEED_MAX).replace(/\s+\S*$/, '') + '…';
+  return text;
+}
+
 module.exports = init;
 module.exports.AGENT_SECTION = AGENT_SECTION;
+module.exports.renderAgentSection = renderAgentSection;
+module.exports.handoffSettings = handoffSettings;
+module.exports.readmeNarrative = readmeNarrative;
+module.exports.seedNarrative = seedNarrative;
 module.exports.AGENT_BEGIN = AGENT_BEGIN;
 module.exports.AGENT_END = AGENT_END;
 // Exported so src/upgrade.js installs the SAME pinned post-commit hook (DRY —
 // one template, no drift between init and upgrade).
-module.exports.postCommitHook = postCommitHook;
-module.exports.HOOK_SCRIPT = HOOK_SCRIPT;
+module.exports.postCommitHook = hooks.postCommitHook;
+module.exports.HOOK_SCRIPT = hooks.postCommitHook('', '');

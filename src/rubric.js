@@ -282,7 +282,28 @@ const DEFAULT_CONFIG = `compaction:
   fleeting_retention: 30
 sources:
   dirs: sources
+handoff:
+  # when-heavy | never | always — when a handoff must link a doc (--docs).
+  # Rendered into the AGENTS.md block; re-run \`pebbl upgrade\` after changing.
+  docs: when-heavy
+  docs_dir: docs/handoffs
+session_check:
+  # Optional: hold a turn when a numbered decision added to this file (vs
+  # decisions_base) has no pebbl entry citing "decision N".
+  # decisions_file: "docs/10.01 Decisions.md"
+  # decision_pattern: '^(\\d+)\\.\\s'
+  # decisions_base: origin/main
 `;
+
+// The `handoff:` block of config.yml with defaults applied. Read by init/upgrade
+// (to render the AGENTS.md block) and handoff (to enforce the same rule).
+const HANDOFF_DOCS_MODES = ['when-heavy', 'never', 'always'];
+function handoffSettings(config) {
+  const h = (config && config.handoff) || {};
+  const docs = HANDOFF_DOCS_MODES.includes(h.docs) ? h.docs : 'when-heavy';
+  const docsDir = String(h.docs_dir || 'docs/handoffs').replace(/\/+$/, '');
+  return { docs, docsDir };
+}
 
 // Byte offset just past the end of the top-level `rules:` line, or -1 if the
 // rubric has no such line. Every rule insertion anchors off this so a new rule
@@ -484,4 +505,5 @@ function ensureProjectFiles(pebblDir) {
 
 module.exports.DEFAULT_RUBRIC = DEFAULT_RUBRIC;
 module.exports.DEFAULT_CONFIG = DEFAULT_CONFIG;
+module.exports.handoffSettings = handoffSettings;
 module.exports.ensureProjectFiles = ensureProjectFiles;
