@@ -3,23 +3,6 @@
 Node.js CLI for local project memory. Stores decisions, handoffs, and commit
 context in SQLite under `.pebbl/`. Entry point: `bin/pebbl.js`.
 
-## Factory routing (loom)
-
-Building or fixing something? Route it through loom (the factory at `~/loom`).
-The old sw-factory / droplet/repos.conf system is archived.
-
-- **Queue a task:** `loom add "<goal>" --area <paths>` (or `loom scope <idea>` + `loom scope --approve <id>` for a gated spec).
-- **Build it:** `loom next` claims the next task; `loom claim <id>` to hand-target one. Run the build in a fresh-context subagent.
-- **Land it:** `loom review <id> <dir> <test-cmd>` → `loom promote <branch> main --repo <path> --task <id>`, or `loom landed <id> --evidence <sha>` for an external merge.
-
-Interactive session editing this repo directly? Take a lane first:
-
-```bash
-cd ~/loom && loom lease acquire --area '<repo-relative globs>'
-# … edit, commit …
-loom lease release
-```
-
 ## Commands
 
 ```bash

@@ -6,7 +6,7 @@
 # is preserved until it is committed and nothing leaves the machine until it is
 # pushed. A quiet week would otherwise leave a week of decisions on one laptop.
 # The trigger for building it: 16 entries -- a full day of decisions -- were found
-# sitting uncommitted, and loom's store had never left this disk at all.
+# sitting uncommitted, and one store had never left this disk at all.
 #
 # ONE job over a LIST, not one job per repo. Six near-identical committers is how
 # five of them quietly drift. Adding a store is a line in stores.json.
@@ -27,7 +27,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PEBBL="/Users/ashley/pebbl/bin/pebbl.js"
 STORES="$HERE/stores.json"
 LOG="/Users/ashley/pebbl/.git/memory-commit.log"
-LOOM_STORE="/Users/ashley/loom"
+# The liveness registry lives in pebbl's own store (this repo).
+REGISTRY_STORE="$(dirname "$HERE")"
 PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 # shellcheck source=lib-git-auth.sh
@@ -51,19 +52,19 @@ if ! command -v node >/dev/null 2>&1; then
 fi
 
 # Beat a store's liveness, but ONLY after its run is verified. The beat lands in
-# LOOM's store, because `loom maintain` reads that registry every 4h and
-# escalates whatever is OVERDUE -- the absence of a beat is what turns a silent
-# death into an alarm. Never beat from anywhere but this scheduled job: a human
-# beating by hand would mask a dead scheduler.
+# pebbl's own store, where `pebbl liveness check` reports whatever is OVERDUE --
+# the absence of a beat is what turns a silent death into an alarm. Never beat
+# from anywhere but this scheduled job: a human beating by hand would mask a
+# dead scheduler.
 #
-# RE-REGISTER before beating, the way loom does for its own recurring jobs.
-# Registration is idempotent, and without it the contract is not self-restoring:
-# if loom's store were reset, the registration would vanish and `liveness check`
-# would read GREEN off a registry that no longer watches this job -- a monitor
-# that has silently stopped monitoring.
+# RE-REGISTER before beating. Registration is idempotent, and without it the
+# contract is not self-restoring: if the registry store were reset, the
+# registration would vanish and `liveness check` would read GREEN off a registry
+# that no longer watches this job -- a monitor that has silently stopped
+# monitoring.
 beat() {
   local job="$1" proof="$2"
-  if (cd "$LOOM_STORE" \
+  if (cd "$REGISTRY_STORE" \
         && node "$PEBBL" liveness register "$job" --every 24h --grace 12h >/dev/null 2>&1 \
         && node "$PEBBL" heartbeat "$job" --proof "$proof" >/dev/null 2>&1); then
     say "  beat $job ($proof)"
@@ -93,8 +94,8 @@ commit_store() {
   # Never hijack a human's in-progress commit. The precise hazard is the INDEX:
   # we only ever `git add` the store paths, but `git commit` sweeps up whatever
   # is ALREADY staged. Untracked files and unstaged edits are not that hazard and
-  # must not block -- loom's tree is essentially never clean, and a "skip if
-  # anything is dirty" rule would mean loom's memory is never committed at all:
+  # must not block -- a working repo's tree is rarely clean, and a "skip if
+  # anything is dirty" rule would mean its memory is never committed at all:
   # a silent backup failure dressed up as politeness.
   local staged
   staged=$(git -C "$path" diff --cached --name-only -- . ':(exclude).pebbl' ':(exclude).pebbl-audit-accepted.json' 2>/dev/null | sed -n '1p')
@@ -127,7 +128,7 @@ commit_store() {
     local n
     n=$(git -C "$path" diff --cached --numstat | awk '{a+=$1; d+=$2} END {print a+0"+/"d+0"-"}')
     # Capture the commit's own output. A repo can have a heavyweight pre-commit
-    # gate (loom runs fmt + lint + its whole test suite), and when one of those
+    # gate (fmt + lint + a whole test suite), and when one of those
     # fails the reason is the only thing that makes the failure actionable.
     # Discarding it left "FATAL commit failed" with no cause — the precise shape
     # of silent failure this pipeline exists to eliminate, reproduced inside the
@@ -162,8 +163,8 @@ commit_store() {
     beat "$job" "up to date, nothing new"
     return 0
   fi
-  # No upstream is the NORMAL state for a working branch, not an error. loom
-  # spends its life on a feature branch, and refusing to push there would leave
+  # No upstream is the NORMAL state for a working branch, not an error. A repo
+  # can spend its life on a feature branch, and refusing to push there would leave
   # its memory permanently unbacked-up while the log said only "cannot tell" --
   # a backup that quietly never runs. This is a backup remote, so the right move
   # is to create the matching remote branch and track it.

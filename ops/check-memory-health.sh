@@ -7,9 +7,9 @@
 # true are report-only and named as such below.
 #
 # The guard against auto-repair hiding a real problem: every repair is LOGGED to
-# pebbl. pebbl's recurrence detector then counts repeats, and `loom maintain`
-# escalates anything over threshold — so a thing that keeps breaking becomes an
-# escalation instead of a silently re-applied band-aid.
+# pebbl's own store. pebbl's recurrence detector then counts repeats, so a thing
+# that keeps breaking shows up as a recurring repair instead of a silently
+# re-applied band-aid.
 #
 #   (no args)   verify and repair          --verify-only   report, change nothing
 #   --json      machine-readable           --fix-location  allow the repo relocation
@@ -51,9 +51,9 @@ fixed()  { findings+=("FIXED|$1|$2"); repairs=$((repairs + 1)); log_repair "$1" 
 # must not turn a successful repair into a failure.
 log_repair() {
   local check="$1" detail="$2"
-  (cd /Users/ashley/loom && node "$PEBBL" log \
+  (cd "$REPO" && node "$PEBBL" log \
      "auto-repaired dev-tools memory invariant [$check]: $detail" \
-     --cat steering --topic loom,pebbl,liveness,self-heal >/dev/null 2>&1) || true
+     --cat steering --topic pebbl,liveness,self-heal >/dev/null 2>&1) || true
 }
 
 # Attempt a repair only when repairing is enabled; otherwise record the FAIL.

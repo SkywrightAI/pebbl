@@ -17,7 +17,7 @@ cd ~/pebbl
 bash ops/check-memory-health.sh     # what is broken, right now
 bash ops/test-memory-health.sh      # prove the checks still catch faults
 bash ops/commit-memory.sh           # run the daily job by hand
-cd ~/loom && pebbl liveness check   # is the beat current?
+pebbl liveness check               # is each store's beat current?
 ```
 
 ## Why any of this exists
@@ -27,11 +27,13 @@ firing, when a token expires, or when a second store appears outside the repo.
 You just stop having history and find out months later.
 
 You cannot watch for an absence, so it is flipped into a presence: **the job
-beats a liveness heartbeat, and only after the invariant checks pass.**
-`loom maintain` walks that registry every four hours and escalates whatever is
-OVERDUE. No beat for 24h + 12h grace and it gets raised.
+beats a liveness heartbeat, and only after the invariant checks pass.** The
+registry lives in pebbl's own store; `pebbl liveness check` here reports any
+store with no beat for 24h + 12h grace as OVERDUE. Nothing runs that check on a
+schedule since loom was retired, so run it by hand (or wire it to a job) to get
+the alarm.
 
-Every store beats its OWN heartbeat (`memory-pebbl`, `memory-loom`, …). A single
+Every store beats its OWN heartbeat (`memory-pebbl`, `memory-lumr`, …). A single
 shared beat would read green as long as ANY store committed, which hides exactly
 the failure worth catching: one repo silently dropping out while the others carry
 the signal. A store with no remote is committed but never beaten — a green beat
@@ -54,9 +56,9 @@ Three properties that matter more than the list:
 
 **The check repairs, and every repair is logged.** These invariants have exactly
 one correct state, so there is no diagnosis to get wrong. The guard against a
-band-aid: each repair writes to pebbl, so recurrence counts repeats and `loom
-maintain` escalates a thing that keeps breaking instead of letting it be
-re-fixed silently every night. Three things stay report-only and say so —
+band-aid: each repair writes to pebbl, so recurrence counts repeats and a thing
+that keeps breaking shows up as a recurring repair instead of being re-fixed
+silently every night. Three things stay report-only and say so —
 relocating the repo, an expired token that only GitHub settings can fix, and a
 store that reappears outside the repo (relinking would strand whatever history
 the other store holds).
@@ -66,7 +68,7 @@ then a human looking into things would mask a dead scheduler — hiding the exac
 failure being hunted.
 
 **The heartbeat re-registers its own contract every run.** Otherwise a reset of
-loom's store would drop the registration and the check would read green for a
+the registry store would drop the registration and the check would read green for a
 job it had quietly stopped watching.
 
 `test-memory-health.sh` exists for the same reason: a monitor that has only ever
