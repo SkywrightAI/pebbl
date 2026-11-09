@@ -316,11 +316,13 @@ function makeHandoffCloseEvent(pebblDir, { ts, handoff, actor }) {
   };
 }
 
-// The eid of the `handoff-open` event for a db.sqlite handoff row, matched on
-// (timestamp, summary) — the row has no eid column. null when the handoff
-// predates handoff events (nothing in the fold to close).
-function findHandoffOpenEid(pebblDir, { timestamp, summary }) {
-  const hit = readEvents(pebblDir).find(
+// The eid of the `handoff-open` event for a handoff row, matched on
+// (timestamp, summary) — neither db.sqlite's nor view.sqlite's row carries an
+// eid, and a view row's timestamp and summary are the event's own. null when
+// the handoff predates handoff events (nothing in the fold to close). Pass
+// `events` (one readEvents) when matching several rows against the same log.
+function findHandoffOpenEid(pebblDir, { timestamp, summary }, events) {
+  const hit = (events || readEvents(pebblDir)).find(
     (e) => e.type === 'handoff-open' && e.ts === timestamp && (e.summary || '') === (summary || '')
   );
   return hit ? hit.eid : null;

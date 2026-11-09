@@ -942,3 +942,178 @@ describe('handoff - commit captures are not session entries', () => {
     assert.match(r.stdout, /Session: 1 log entries/);
   });
 });
+
+describe('handoff - events-mode store: opens that live only in the fold', () => {
+  // A `pebbl init --shared` store is events-mode (storeMode === 'events'): the
+  // committed events.jsonl is the store, db.sqlite is a gitignored local
+  // write-through that a teammate's clone never has. A handoff another clone
+  // wrote (or one the migration minted) is therefore an open that exists ONLY
+  // in the folded view.sqlite — the case loom hit on 2026-11-09, where handoff
+  // #8 closed none of #1-#7 because priors were read from db.sqlite.
+  const { readEvents, foldFull } = require('../src/events');
+  const { storeMode } = require('../src/store-mode');
+  const dirs = [];
+  after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
+  const env = { ...process.env, PEBBL_REMOTE_VISIBILITY: 'private' };
+
+  function sharedProject() {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pebbl-handoff-shared-'));
+    dirs.push(dir);
+    execSync('git init -q && git config user.email a@b.c && git config user.name t', { cwd: dir });
+    const r = spawnSync(BIN, ['init', '--shared'], { cwd: dir, encoding: 'utf8', env });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(storeMode(path.join(dir, '.pebbl')), 'events');
+    return dir;
+  }
+  const run = (dir, args) => spawnSync(BIN, ['handoff', ...args], { cwd: dir, encoding: 'utf8', env });
+  // Simulate a clone that pulled only events.jsonl: the handoffs written so far
+  // stay in the fold, but this machine's db.sqlite never saw them.
+  const dropLocalDb = (dir) => fs.rmSync(path.join(dir, '.pebbl', 'db.sqlite'), { force: true });
+  const folded = (dir) => foldFull(readEvents(path.join(dir, '.pebbl'))).handoffs;
+  const dbRows = (dir) => {
+    const db = new Database(path.join(dir, '.pebbl', 'db.sqlite'), { readonly: true });
+    try { return db.prepare('SELECT id, summary, status, todo FROM handoffs ORDER BY id').all(); } finally { db.close(); }
+  };
+
+  it('a second handoff closes a fold-only open and carries its todo', () => {
+    const dir = sharedProject();
+    assert.equal(run(dir, ['first wake', '--todo', 'wire the judge; call the county']).status, 0);
+    dropLocalDb(dir);
+    const r = run(dir, ['second wake', '--done', 'wire the judge', '--todo', 'ship it']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /Closed earlier handoff: #1/);
+    assert.match(r.stdout, /from #1: call the county/);
+    const [h1, h2] = folded(dir);
+    assert.equal(h1.status, 'closed', 'the fold-only prior is closed in the fold');
+    assert.equal(h2.status, 'open');
+    assert.deepEqual(splitItems(h2.todo), ['ship it', 'from #1: call the county']);
+    // db.sqlite holds only the new handoff — as its row #1, the SAME id the
+    // fold gave the prior — and it must still be open: the prior's close went
+    // to the fold, never to a db row picked by the view's id.
+    assert.deepEqual(dbRows(dir).map((h) => [h.id, h.summary, h.status]), [[1, 'second wake', 'open']]);
+    const ctx = spawnSync(BIN, ['context'], { cwd: dir, encoding: 'utf8', env }).stdout;
+    assert.match(ctx, /Open handoff from previous agent \(#2/);
+    assert.doesNotMatch(ctx, /open handoffs \(oldest/, 'context no longer reports stacked opens');
+  });
+
+  it('--list-open and --list show a fold-only open; --latest shows it', () => {
+    const dir = sharedProject();
+    assert.equal(run(dir, ['only in the fold', '--todo', 'a thing', '--topic', 'loom']).status, 0);
+    dropLocalDb(dir);
+    const open = run(dir, ['--list-open']);
+    assert.equal(open.status, 0, open.stderr);
+    assert.match(open.stdout, /^#1 \[open\]  \d{4}-\d{2}-\d{2} — only in the fold \(loom\)$/m);
+    const list = run(dir, ['--list']);
+    assert.match(list.stdout, /#1 \[open\] .* only in the fold/);
+    const latest = run(dir, ['--latest']);
+    assert.match(latest.stdout, /Handoff #1 \[OPEN\]/);
+    assert.match(latest.stdout, /Summary: only in the fold/);
+    assert.match(latest.stdout, /- a thing/);
+  });
+
+  it('--close <id> closes by the view id, and never a db row that happens to share it', () => {
+    const dir = sharedProject();
+    assert.equal(run(dir, ['first wake', '--todo', 'a thing']).status, 0);
+    dropLocalDb(dir);
+    // #2 in the fold is db row #1; --keep-open leaves #1 open so both are open.
+    assert.equal(run(dir, ['second wake', '--keep-open']).status, 0);
+    assert.deepEqual(folded(dir).map((h) => [h.id, h.status]), [[1, 'open'], [2, 'open']]);
+    const r = run(dir, ['--close', '1']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /Handoff #1 closed\./);
+    assert.deepEqual(folded(dir).map((h) => [h.id, h.status]), [[1, 'closed'], [2, 'open']]);
+    assert.deepEqual(dbRows(dir).map((h) => [h.id, h.summary, h.status]), [[1, 'second wake', 'open']],
+      'db row #1 is a different handoff and stays open');
+    // closing again is refused; the open one closes by its view id and in db.sqlite too
+    assert.equal(run(dir, ['--close', '1']).status, 1);
+    assert.match(run(dir, ['--close', '1']).stderr, /handoff #1 is not open/);
+    assert.equal(run(dir, ['--close', '2']).status, 0);
+    assert.deepEqual(folded(dir).map((h) => h.status), ['closed', 'closed']);
+    assert.equal(dbRows(dir)[0].status, 'closed', 'the handoff this db.sqlite does hold is closed there too');
+    assert.equal(run(dir, ['--close']).status, 1, 'nothing left to close');
+  });
+
+  it('bare --close closes the newest open from the fold', () => {
+    const dir = sharedProject();
+    assert.equal(run(dir, ['first wake', '--todo', 'a thing']).status, 0);
+    dropLocalDb(dir);
+    const r = run(dir, ['--close']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /Handoff #1 closed\./);
+    assert.equal(folded(dir)[0].status, 'closed');
+  });
+
+  it('a handoff this clone did write is closed in db.sqlite as well as in the fold', () => {
+    const dir = sharedProject();
+    assert.equal(run(dir, ['first wake', '--todo', 'a thing']).status, 0);
+    assert.equal(run(dir, ['second wake']).status, 0);
+    assert.deepEqual(folded(dir).map((h) => h.status), ['closed', 'open']);
+    assert.deepEqual(dbRows(dir).map((h) => [h.summary, h.status]), [['first wake', 'closed'], ['second wake', 'open']]);
+    assert.deepEqual(splitItems(dbRows(dir)[1].todo), ['from #1: a thing']);
+  });
+
+  it('two clones: a handoff pulled from a teammate is closed by the next one here', () => {
+    const origin = fs.mkdtempSync(path.join(os.tmpdir(), 'pebbl-handoff-origin-'));
+    const a = fs.mkdtempSync(path.join(os.tmpdir(), 'pebbl-handoff-A-'));
+    const b = fs.mkdtempSync(path.join(os.tmpdir(), 'pebbl-handoff-B-'));
+    dirs.push(origin, a, b);
+    const sh = (cwd, cmd) => execSync(cmd, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], env: { ...env, PEBBL_SKIP_SCAN: '1' } });
+    sh(origin, 'git init -q --bare');
+    sh(a, `git clone -q "${origin}" . && git config user.email a@b.c && git config user.name aa && git checkout -q -b main`);
+    assert.equal(spawnSync(BIN, ['init', '--shared'], { cwd: a, encoding: 'utf8', env }).status, 0);
+    assert.equal(run(a, ['from clone A', '--todo', 'finish the import', '--topic', 'core']).status, 0);
+    sh(a, 'git add -A && git commit -qm "A handoff" && git push -q -u origin main');
+    sh(b, `git clone -q "${origin}" . && git config user.email b@b.c && git config user.name bb`);
+    assert.ok(!fs.existsSync(path.join(b, '.pebbl', 'db.sqlite')), 'B pulled no db.sqlite');
+    const r = run(b, ['from clone B', '--todo', 'review the import']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /Closed earlier handoff: #1/);
+    assert.match(r.stdout, /from #1: finish the import/);
+    assert.deepEqual(folded(b).map((h) => [h.summary, h.status]), [['from clone A', 'closed'], ['from clone B', 'open']]);
+    assert.match(spawnSync(BIN, ['handoff', '--list-open'], { cwd: b, encoding: 'utf8', env }).stdout, /^#2 \[open\].*from clone B/m);
+    assert.doesNotMatch(spawnSync(BIN, ['handoff', '--list-open'], { cwd: b, encoding: 'utf8', env }).stdout, /from clone A/);
+  });
+});
+
+describe('handoff - legacy (db.sqlite-only) store is unchanged', () => {
+  // A default `pebbl init` store is legacy: events.jsonl is a gitignored tracer,
+  // db.sqlite is the store. Priors, lists and --close come from db.sqlite alone,
+  // so a handoff-open event with no db row is NOT an open handoff here, and a
+  // db row with no event is.
+  const { makeHandoffOpenEvent, appendEventBatch, readEvents, foldFull } = require('../src/events');
+  const { storeMode } = require('../src/store-mode');
+  const dirs = [];
+  after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
+  const dbRows = (dir) => {
+    const db = new Database(path.join(dir, '.pebbl', 'db.sqlite'), { readonly: true });
+    try { return db.prepare('SELECT id, summary, status, todo FROM handoffs ORDER BY id').all(); } finally { db.close(); }
+  };
+
+  it('reads priors and --list-open from db.sqlite only; a tracer-only event is not an open', () => {
+    const dir = initProject();
+    dirs.push(dir);
+    const pebblDir = path.join(dir, '.pebbl');
+    assert.equal(storeMode(pebblDir), 'legacy');
+    // a db-only open row (no event), as every pre-event store has
+    const db = new Database(path.join(pebblDir, 'db.sqlite'));
+    db.prepare("INSERT INTO handoffs (timestamp, summary, todo, status, session_entries, session_commits) VALUES (?, ?, ?, 'open', '[]', '[]')")
+      .run('2026-01-01T00:00:00.000Z', 'db only open', 'old thing');
+    db.close();
+    // an event-only open (no db row): in a legacy store the tracer is not the store
+    appendEventBatch(pebblDir, [makeHandoffOpenEvent(pebblDir, {
+      ts: '2026-01-02T00:00:00.000Z', summary: 'tracer only open', todo: 'ghost thing', source: 'agent',
+    })]);
+    const open = runHandoff(dir, ['--list-open']);
+    assert.match(open.stdout, /#1 \[open\].*db only open/);
+    assert.doesNotMatch(open.stdout, /tracer only open/);
+    const r = runHandoff(dir, ['next wake', '--todo', 'new thing']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /Closed earlier handoff: #1/);
+    assert.match(r.stdout, /from #1: old thing/);
+    assert.doesNotMatch(r.stdout, /ghost thing/);
+    assert.deepEqual(dbRows(dir).map((h) => [h.id, h.status]), [[1, 'closed'], [2, 'open']]);
+    assert.equal(foldFull(readEvents(pebblDir)).handoffs.find((h) => h.summary === 'tracer only open').status, 'open');
+    assert.equal(runHandoff(dir, ['--close', '1']).status, 1, 'db ids are the ids');
+    assert.equal(runHandoff(dir, ['--close', '2']).status, 0);
+  });
+});

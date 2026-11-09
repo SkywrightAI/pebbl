@@ -3,9 +3,10 @@ const fs = require('fs');
 const path = require('path');
 const { parseArgs } = require('./args');
 const { requirePebblDir } = require('./find-pebbl');
-const { openDb } = require('./db');
+const { openDb, openReadDb } = require('./db');
+const { storeMode } = require('./store-mode');
 const { ensureProjectFiles, loadConfig, handoffSettings } = require('./rubric');
-const { makeHandoffOpenEvent, makeHandoffCloseEvent, findHandoffOpenEid, appendEventBatch } = require('./events');
+const { makeHandoffOpenEvent, makeHandoffCloseEvent, findHandoffOpenEid, appendEventBatch, readEvents } = require('./events');
 const { displayEntry } = require('./log');
 const { mirrorHandoffs, stripHandoffPrefix } = require('./mirror');
 // Projection-boundary secret mask. handoffs.md is committed and the promote
@@ -51,20 +52,32 @@ module.exports = function handoff(args) {
   ensureProjectFiles(pebblDir);
   const db = openDb(pebblDir);
 
+  // Where handoffs are READ from. In a legacy store that is db.sqlite itself.
+  // In an events-mode store (shared, or migrated) events.jsonl is the store and
+  // db.sqlite only this machine's write-through: a handoff a teammate wrote, or
+  // one the migration minted, has no row here and lives only in the folded
+  // view. Priors, --list, --latest and the --close targets come from the read
+  // view so those opens are seen and closed — loom's handoff #8 closed none of
+  // #1-#7 while this read db.sqlite. Ids shown and accepted are the view's, the
+  // ones `pebbl context` prints; closeHandoffRow never carries one to db.sqlite.
+  const fromView = storeMode(pebblDir) === 'events';
+  const rdb = fromView ? openReadDb(pebblDir) : db;
+  const doneReading = () => { if (rdb !== db) rdb.close(); };
+
   // Mode 1: --latest
   if (flags.latest) {
-    const row = db.prepare('SELECT * FROM handoffs ORDER BY id DESC LIMIT 1').get();
+    const row = rdb.prepare('SELECT * FROM handoffs ORDER BY id DESC LIMIT 1').get();
     if (!row) {
       console.log('pebbl: no handoffs found');
       return;
     }
-    displayHandoff(row, db);
+    displayHandoff(row, rdb);
     return;
   }
 
   // Mode 2: --list
   if (flags.list) {
-    const rows = db.prepare(
+    const rows = rdb.prepare(
       'SELECT id, timestamp, summary, topics, status FROM handoffs ORDER BY id DESC LIMIT 10'
     ).all();
 
@@ -96,7 +109,7 @@ module.exports = function handoff(args) {
   // Mode 2b: --open / --list-open — every open handoff, no LIMIT. Mirrors the
   // --list block but filters status='open' so stacked opens are drainable.
   if (flags.open || flags['list-open']) {
-    const rows = db.prepare(
+    const rows = rdb.prepare(
       "SELECT id, timestamp, summary, topics, status FROM handoffs WHERE status = 'open' ORDER BY id DESC"
     ).all();
 
@@ -131,7 +144,7 @@ module.exports = function handoff(args) {
         console.error(`pebbl: handoff --close expects a numeric id, got "${idArg}"`);
         process.exit(1);
       }
-      row = db.prepare('SELECT * FROM handoffs WHERE id = ?').get(parseInt(idArg, 10));
+      row = rdb.prepare('SELECT * FROM handoffs WHERE id = ?').get(parseInt(idArg, 10));
       if (!row) {
         console.error(`pebbl: no handoff #${idArg}`);
         process.exit(1);
@@ -141,7 +154,7 @@ module.exports = function handoff(args) {
         process.exit(1);
       }
     } else {
-      row = db.prepare(
+      row = rdb.prepare(
         "SELECT * FROM handoffs WHERE status = 'open' ORDER BY id DESC LIMIT 1"
       ).get();
       if (!row) {
@@ -149,14 +162,16 @@ module.exports = function handoff(args) {
         process.exit(1);
       }
     }
+    doneReading();
 
     const ts = new Date().toISOString();
-    const { demoted, closeEvent } = closeHandoffRow(db, pebblDir, row, ts);
-    appendHandoffEvents(pebblDir, closeEvent ? [closeEvent] : []);
+    const { demoted, closeEvent } = closeHandoffRow(db, pebblDir, row, ts, { fromView });
+    appendHandoffEvents(pebblDir, closeEvent ? [closeEvent] : [], fromView ? () => rebuildFromEvents(pebblDir) : undefined);
 
     // Re-materialize handoffs.md at item granularity so each done/todo/
-    // blocked item is its own searchable block.
-    materializeHandoffsMd(pebblDir, db);
+    // blocked item is its own searchable block. (An events-mode store renders
+    // handoffs.md from the fold in rebuildFromEvents instead.)
+    if (!fromView) materializeHandoffsMd(pebblDir, db);
 
     console.log(`Handoff #${row.id} closed.`);
     if (demoted > 0) {
@@ -273,7 +288,7 @@ module.exports = function handoff(args) {
   }
 
   // Auto-collect: find all log entries since the last handoff (or last 2 hours)
-  const lastHandoff = db.prepare(
+  const lastHandoff = rdb.prepare(
     "SELECT timestamp FROM handoffs ORDER BY id DESC LIMIT 1"
   ).get();
   const cutoff = lastHandoff
@@ -307,7 +322,8 @@ module.exports = function handoff(args) {
   // are added AFTER the detail-doc guard so inherited todos can't trip it.
   const priors = flags['keep-open']
     ? []
-    : db.prepare("SELECT * FROM handoffs WHERE status = 'open' ORDER BY id ASC").all();
+    : rdb.prepare("SELECT * FROM handoffs WHERE status = 'open' ORDER BY id ASC").all();
+  doneReading();
   const carried = carriedTodos(priors, [done, todo], MAX_ITEM_CHARS);
   const newTodos = splitItems(todo).length;
   if (newTodos + carried.length > MAX_ITEMS) {
@@ -329,20 +345,35 @@ module.exports = function handoff(args) {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
   `).run(ts, summary, done, todo, blocked, topics, source, JSON.stringify(sessionEntries), JSON.stringify(sessionCommits), docs);
 
-  const events = [makeHandoffOpenEvent(pebblDir, { ts, summary, done, todo, blocked, topics, source, docs })];
+  const openEvent = makeHandoffOpenEvent(pebblDir, { ts, summary, done, todo, blocked, topics, source, docs });
+  const events = [openEvent];
   const closed = [];
+  // One read of the event log serves every prior's handoff-open match.
+  let eventLog = null;
+  if (priors.length > 0) {
+    try { eventLog = readEvents(pebblDir); } catch { /* closeHandoffRow re-reads, and copes */ }
+  }
   for (const prior of priors) {
-    const { closeEvent } = closeHandoffRow(db, pebblDir, prior, ts);
+    const { closeEvent } = closeHandoffRow(db, pebblDir, prior, ts, { fromView, events: eventLog });
     if (closeEvent) events.push(closeEvent);
     closed.push(prior.id);
   }
-  appendHandoffEvents(pebblDir, events);
+  let projection = null;
+  appendHandoffEvents(pebblDir, events, fromView ? () => { projection = rebuildFromEvents(pebblDir); } : undefined);
 
-  // Re-materialize so the new (open) handoff is searchable immediately.
-  materializeHandoffsMd(pebblDir, db);
+  // Re-materialize so the new (open) handoff is searchable immediately. (An
+  // events-mode store renders handoffs.md from the fold in rebuildFromEvents.)
+  if (!fromView) materializeHandoffsMd(pebblDir, db);
+
+  // The id to show: db.sqlite's in a legacy store; in an events-mode store the
+  // fold's, so it matches `pebbl context` and `--close <id>` (db.sqlite's row
+  // number is this machine's alone). Falls back to the db id if the rebuild
+  // was skipped.
+  const mine = projection && projection.handoffs.find((h) => h.eid === openEvent.eid);
+  const shownId = mine ? mine.id : result.lastInsertRowid;
 
   // Display
-  console.log(`\n── Handoff #${result.lastInsertRowid} created ──`);
+  console.log(`\n── Handoff #${shownId} created ──`);
   console.log(`Summary: ${summary}`);
   if (done) console.log(`Done: ${done}`);
   if (todo) console.log(`Todo: ${todo}`);
@@ -366,46 +397,88 @@ module.exports = function handoff(args) {
   }
 };
 
-// Close one handoff row: mark it closed and demote its session detail entries
-// to fleeting (compaction-eligible). Shared by --close and by a new handoff
-// superseding earlier opens, so both close the same way. Returns the number of
-// entries demoted and the handoff-close event to append (null when the handoff
-// predates handoff events, so the fold has nothing to close).
-function closeHandoffRow(db, pebblDir, row, ts) {
-  // The handoffs table is the authority for summary/done/todo/blocked — we no
-  // longer flatten those fields into a single foundation log row (that produced
-  // unsearchable multi-KB blobs).
-  db.prepare(
-    "UPDATE handoffs SET status = 'closed', closed_at = ? WHERE id = ?"
-  ).run(ts, row.id);
+// Close one handoff: mark its db.sqlite row closed, demote that row's session
+// detail entries to fleeting (compaction-eligible), and make the handoff-close
+// event. Shared by --close and by a new handoff superseding earlier opens, so
+// both close the same way. Returns the number of entries demoted and the
+// handoff-close event to append (null when the handoff predates handoff
+// events, so the fold has nothing to close).
+//
+// `row` is what the read side returned. From db.sqlite (a legacy store) it is
+// the row to update, by id, as before. From the folded view (events-mode,
+// opts.fromView) the matching db.sqlite row is found by (timestamp, summary):
+// the view's integer id is a per-rebuild artifact that can name a DIFFERENT
+// db row (loom: view #1 is a 2026-07 handoff, db #1 the one written on
+// 2026-11-09), and a handoff written on another clone, or before this
+// db.sqlite existed, has no row here at all — then there is nothing to update
+// and the handoff-close event IS the close.
+function closeHandoffRow(db, pebblDir, row, ts, { fromView = false, events = null } = {}) {
+  const target = fromView
+    ? db.prepare(
+        "SELECT * FROM handoffs WHERE timestamp = ? AND summary = ? AND status = 'open' ORDER BY id DESC LIMIT 1"
+      ).get(row.timestamp, row.summary)
+    : row;
 
-  const entryIds = JSON.parse(row.session_entries || '[]');
-  if (entryIds.length > 0) {
-    const placeholders = entryIds.map(() => '?').join(',');
+  let demoted = 0;
+  if (target) {
+    // The handoffs table is the authority for summary/done/todo/blocked — we no
+    // longer flatten those fields into a single foundation log row (that
+    // produced unsearchable multi-KB blobs).
     db.prepare(
-      `UPDATE logs SET tier = 'fleeting' WHERE id IN (${placeholders}) AND tier = 'detail'`
-    ).run(...entryIds);
+      "UPDATE handoffs SET status = 'closed', closed_at = ? WHERE id = ?"
+    ).run(ts, target.id);
+
+    const entryIds = JSON.parse(target.session_entries || '[]');
+    if (entryIds.length > 0) {
+      const placeholders = entryIds.map(() => '?').join(',');
+      db.prepare(
+        `UPDATE logs SET tier = 'fleeting' WHERE id IN (${placeholders}) AND tier = 'detail'`
+      ).run(...entryIds);
+    }
+    demoted = entryIds.length;
   }
 
   let closeEvent = null;
   try {
-    const eid = findHandoffOpenEid(pebblDir, row);
+    const eid = findHandoffOpenEid(pebblDir, row, events);
     if (eid) closeEvent = makeHandoffCloseEvent(pebblDir, { ts, handoff: eid });
   } catch {
     // unreadable events log: db.sqlite already holds the close
   }
-  return { demoted: entryIds.length, closeEvent };
+  return { demoted, closeEvent };
 }
 
 // Append handoff events so a shared / events-mode store keeps its handoffs on
 // rebuild. Best-effort: db.sqlite is already written (and is canonical in a
 // legacy store), so a failed append warns instead of failing the handoff.
-function appendHandoffEvents(pebblDir, events) {
+// `rebuild` runs inside the store lock after the append (see appendEventBatch).
+function appendHandoffEvents(pebblDir, events, rebuild) {
   if (events.length === 0) return;
   try {
-    appendEventBatch(pebblDir, events);
+    appendEventBatch(pebblDir, events, rebuild);
   } catch (err) {
     console.error(`pebbl: handoff saved, but events.jsonl append failed (${err.message}) — run pebbl doctor`);
+  }
+}
+
+// In an events-mode store the fold is the store: once the events have landed,
+// rebuild view.sqlite and the derived markdown (handoffs.md among them) from
+// it and stamp the staleness watermark — the same rebuild the lazy read path
+// would run on the next command, done now so the new handoff and its closed
+// priors show at once. Runs inside appendEventBatch's lock, like log.js
+// rebuildEventsView; best-effort, the events are the durable record. Returns
+// the projection (its handoffs carry the fold's ids), or null.
+function rebuildFromEvents(pebblDir) {
+  try {
+    const { rebuildView } = require('./view');
+    const { currentState, writeWatermark } = require('./staleness');
+    const projection = rebuildView(pebblDir, readEvents(pebblDir));
+    const state = currentState(pebblDir);
+    if (state) writeWatermark(pebblDir, state);
+    return projection;
+  } catch (err) {
+    console.error(`pebbl: view rebuild skipped (${err.message}) — the next read refolds`);
+    return null;
   }
 }
 
