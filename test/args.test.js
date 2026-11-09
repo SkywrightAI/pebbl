@@ -192,12 +192,18 @@ describe('parseArgs', () => {
     assert.strictEqual(parseArgs(['--preview']).flags.preview, true);
   });
 
-  // ── guardrail: --full demotion + unknown pass-through preserved ──────────
-  it('still demotes unknown --full to positional (context.js reads it raw)', () => {
-    const result = parseArgs(['--full']);
+  // ── guardrail: unknown pass-through preserved ────────────────────────────
+  it('demotes an unknown flag to positional instead of swallowing it', () => {
+    const result = parseArgs(['--nope']);
     assert.deepStrictEqual(result.flags, {});
-    assert.deepStrictEqual(result.positional, ['--full']);
+    assert.deepStrictEqual(result.positional, ['--nope']);
     assert.deepStrictEqual(result.missingValueFlags, []);
+  });
+
+  it('--full and --cap are context flags: boolean and value', () => {
+    assert.strictEqual(parseArgs(['--full']).flags.full, true);
+    assert.deepStrictEqual(parseArgs(['--full']).positional, []);
+    assert.strictEqual(parseArgs(['--cap', '800']).flags.cap, '800');
   });
 
   // ── shared guards ───────────────────────────────────────────────────────

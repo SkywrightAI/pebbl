@@ -191,7 +191,7 @@ Then in any git repo:
 ```bash
 pebbl init                  # Set up .pebbl/
 pebbl log "your note"       # Start logging
-pebbl context               # Dump recent context for copy/paste
+pebbl context               # The session-start read, capped at 6,000 chars (--full lifts it)
 ```
 
 Flag cheat sheet:
@@ -207,6 +207,7 @@ Handoff flags:
 - `--done <items>` — semicolon-separated completed items
 - `--todo <items>` — semicolon-separated remaining items
 - `--blocked <items>` — semicolon-separated blockers
+- Each field holds at most 8 items of at most 160 characters; past that pebbl refuses and asks for a pointer (a doc, a decision number, a path, a commit) instead of the detail
 - `--latest` — show the most recent handoff
 - `--list` — list recent handoffs
 - `--close` — close an open handoff; session detail entries become compaction-eligible; done/todo/blocked stay searchable in handoffs.md

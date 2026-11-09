@@ -6,7 +6,7 @@ const path = require('path');
 const os = require('os');
 const { spawnSync, execSync } = require('child_process');
 const Database = require('better-sqlite3');
-const { splitItems, joinField, checkFieldQuality, materializeHandoffsMd, malformedSummary } = require('../src/handoff');
+const { splitItems, joinField, materializeHandoffsMd, malformedSummary } = require('../src/handoff');
 
 const BIN = path.resolve(__dirname, '../bin/pebbl.js');
 
@@ -82,8 +82,9 @@ describe('handoff - detail-doc guard', () => {
     db.close();
     return n;
   }
-  // > DETAIL_DOC_THRESHOLD (1200 chars of done+todo+blocked)
-  const heavy = 'this session did a lot; '.repeat(60);
+  // > DETAIL_DOC_THRESHOLD (1200 chars of done+todo+blocked) while inside the item
+  // caps (8 items, 160 chars each): 8 x 154 chars = ~1246.
+  const heavy = Array.from({ length: 8 }, (_, i) => `item ${i} ` + 'detail '.repeat(21)).join('; ');
 
   it('REFUSES a detail-heavy handoff with neither --docs nor --no-doc, store untouched', () => {
     const d = project();
@@ -535,22 +536,6 @@ describe('handoff - field helpers', () => {
     // A terse but real two-word summary writes.
     assert.strictEqual(malformedSummary('fixed retire'), null);
   });
-
-  it('checkFieldQuality warns on long fields with no separators', () => {
-    const warnings = [];
-    const origErr = console.error;
-    console.error = (msg) => warnings.push(msg);
-    try {
-      checkFieldQuality('x'.repeat(300), 'done');            // long, no ; → warn
-      checkFieldQuality('a; b; c'.padEnd(300, ';d'), 'done'); // long but split → no warn
-      checkFieldQuality('short field', 'done');               // short → no warn
-    } finally {
-      console.error = origErr;
-    }
-    assert.strictEqual(warnings.length, 1);
-    assert.match(warnings[0], /--done/);
-    assert.match(warnings[0], /one big block/);
-  });
 });
 
 describe('handoff - create well-formedness guard (end to end)', () => {
@@ -764,7 +749,8 @@ describe('handoff - docs mode from config', () => {
     const cfg = path.join(dir, '.pebbl', 'config.yml');
     fs.writeFileSync(cfg, fs.readFileSync(cfg, 'utf8').replace(/docs: when-heavy/, `docs: ${mode}`));
   };
-  const heavy = 'x'.repeat(700) + '; ' + 'y'.repeat(700);
+  // long (> 1200 chars) but within the item caps
+  const heavy = Array.from({ length: 8 }, (_, i) => `item ${i} ` + 'detail '.repeat(21)).join('; ');
 
   it('never: a long handoff needs no doc', () => {
     const dir = initProject();
@@ -796,5 +782,146 @@ describe('handoff - docs mode from config', () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('handoff - item caps (end to end)', () => {
+  const { itemCapViolation, MAX_ITEMS, MAX_ITEM_CHARS } = require('../src/handoff');
+  const dirs = [];
+  after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
+  const project = () => { const d = initProject(); dirs.push(d); return d; };
+  const count = (d) => {
+    const db = new Database(path.join(d, '.pebbl', 'db.sqlite'), { readonly: true });
+    try { return db.prepare('SELECT COUNT(*) c FROM handoffs').get().c; } finally { db.close(); }
+  };
+
+  it('caps are 8 items per field and 160 chars per item', () => {
+    assert.equal(MAX_ITEMS, 8);
+    assert.equal(MAX_ITEM_CHARS, 160);
+    assert.equal(itemCapViolation('a; b; c', 'done'), null);
+    assert.equal(itemCapViolation(null, 'done'), null);
+    assert.match(itemCapViolation(Array.from({ length: 9 }, (_, i) => `t${i}`).join('; '), 'todo'), /--todo has 9 items; the cap is 8/);
+    assert.match(itemCapViolation('ok; ' + 'x'.repeat(161), 'done'), /--done item 2 is 161 chars; the cap is 160/);
+    assert.equal(itemCapViolation('x'.repeat(160), 'done'), null);
+  });
+
+  it('REFUSES a ninth item, store untouched, and says to point at a doc or decision', () => {
+    const d = project();
+    const r = runHandoff(d, ['too many things', '--todo', Array.from({ length: 9 }, (_, i) => `thing ${i}`).join('; ')]);
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stderr, /--todo has 9 items; the cap is 8 per field/);
+    assert.match(r.stderr, /a doc, a decision number, a file path, a commit/);
+    assert.equal(count(d), 0);
+  });
+
+  it('REFUSES an item over 160 chars, store untouched', () => {
+    const d = project();
+    const r = runHandoff(d, ['one long item', '--done', 'fine', '--done', 'y'.repeat(161)]);
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stderr, /--done item 2 is 161 chars; the cap is 160 per item/);
+    assert.equal(count(d), 0);
+  });
+
+  it('ACCEPTS eight items of up to 160 chars', () => {
+    const d = project();
+    const items = Array.from({ length: 8 }, (_, i) => `item ${i} ` + 'z'.repeat(100));
+    const r = runHandoff(d, ['exactly at the cap', '--todo', items.join('; ')]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(count(d), 1);
+  });
+});
+
+describe('handoff - carried todos stay within the caps', () => {
+  const dirs = [];
+  after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
+  const project = () => { const d = initProject(); dirs.push(d); return d; };
+  // A pre-cap handoff row, written straight into db.sqlite (the CLI refuses it now).
+  const seedOpen = (d, todo) => {
+    const db = new Database(path.join(d, '.pebbl', 'db.sqlite'));
+    try {
+      db.prepare("INSERT INTO handoffs (timestamp, summary, todo, status, session_entries, session_commits) VALUES (?, ?, ?, 'open', '[]', '[]')")
+        .run('2026-01-01T00:00:00.000Z', 'legacy open handoff', todo);
+    } finally { db.close(); }
+  };
+  const latest = (d) => {
+    const db = new Database(path.join(d, '.pebbl', 'db.sqlite'), { readonly: true });
+    try { return db.prepare('SELECT * FROM handoffs ORDER BY id DESC LIMIT 1').get(); } finally { db.close(); }
+  };
+
+  it('REFUSES when carried + new todos would exceed 8, listing what would carry', () => {
+    const d = project();
+    seedOpen(d, Array.from({ length: 8 }, (_, i) => `old ${i}`).join('; '));
+    const r = runHandoff(d, ['next wake', '--todo', 'new one']);
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stderr, /--todo would hold 9 items \(1 new \+ 8 carried from open handoff #1\); the cap is 8/);
+    assert.match(r.stderr, /from #1: old 7/);
+    assert.match(r.stderr, /--keep-open/);
+    assert.equal(latest(d).summary, 'legacy open handoff', 'nothing written, #1 still the latest');
+    assert.equal(latest(d).status, 'open');
+  });
+
+  it('passes once finished items are listed in --done, and the rest carry', () => {
+    const d = project();
+    seedOpen(d, Array.from({ length: 8 }, (_, i) => `old ${i}`).join('; '));
+    const r = runHandoff(d, ['next wake', '--done', 'old 0; old 1', '--todo', 'new one']);
+    assert.equal(r.status, 0, r.stderr);
+    const todos = splitItems(latest(d).todo);
+    assert.equal(todos.length, 7);
+    assert.equal(todos[0], 'new one');
+    assert.ok(todos.includes('from #1: old 7'));
+  });
+
+  it('clips an over-long legacy todo to 160 chars with …, naming its handoff', () => {
+    const d = project();
+    const monster = 'decide the visual gate question (see jig) ' + 'w'.repeat(400);
+    seedOpen(d, `${monster}; small one`);
+    const r = runHandoff(d, ['next wake', '--todo', 'new one']);
+    assert.equal(r.status, 0, r.stderr);
+    const todos = splitItems(latest(d).todo);
+    assert.equal(todos.length, 3);
+    const clipped = todos.find((t) => t.startsWith('from #1: decide'));
+    assert.ok(clipped, latest(d).todo);
+    assert.equal(clipped.length, 160);
+    assert.ok(clipped.endsWith('…'));
+    assert.match(r.stdout, /clipped to 160 chars; the full text is in the handoff it names/);
+  });
+});
+
+describe('handoff - commit captures are not session entries', () => {
+  const dirs = [];
+  after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
+
+  it('--latest lists what the session logged and counts hook captures without listing them', () => {
+    const d = initProject();
+    dirs.push(d);
+    const db = new Database(path.join(d, '.pebbl', 'db.sqlite'));
+    const ins = db.prepare("INSERT INTO logs (timestamp, source, category, tier, message) VALUES (?, ?, ?, ?, ?)");
+    const now = new Date().toISOString();
+    ins.run(now, 'hook', 'uncategorized', 'fleeting', 'memory: pebbl decisions through 2026-10-01 (2+/0-)');
+    ins.run(now, 'hook', 'decision', 'fleeting', 'fix: commit message classified as decision');
+    ins.run(now, 'human', 'decision', 'component', 'REAL-ENTRY chose x because y');
+    // A pre-change handoff row whose session_entries still include the captures.
+    db.prepare("INSERT INTO handoffs (timestamp, summary, status, session_entries, session_commits) VALUES (?, 'legacy row', 'open', ?, '[]')")
+      .run(now, JSON.stringify([1, 2, 3]));
+    db.close();
+    const r = runHandoff(d, ['--latest']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /Session entries \(1, 2 commit captures not shown\):/);
+    assert.match(r.stdout, /REAL-ENTRY/);
+    assert.doesNotMatch(r.stdout, /\[fleeting\|uncategorized\]/);
+    assert.doesNotMatch(r.stdout, /commit message classified/);
+  });
+
+  it('a new handoff does not collect hook captures as session entries', () => {
+    const d = initProject();
+    dirs.push(d);
+    const db = new Database(path.join(d, '.pebbl', 'db.sqlite'));
+    const now = new Date().toISOString();
+    db.prepare("INSERT INTO logs (timestamp, source, category, tier, message) VALUES (?, 'hook', 'uncategorized', 'fleeting', 'a commit')").run(now);
+    db.prepare("INSERT INTO logs (timestamp, source, category, tier, message) VALUES (?, 'human', 'decision', 'component', 'a real one')").run(now);
+    db.close();
+    const r = runHandoff(d, ['fresh handoff', '--todo', 'x thing']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /Session: 1 log entries/);
   });
 });

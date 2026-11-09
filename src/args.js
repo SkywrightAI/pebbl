@@ -21,9 +21,10 @@ const KNOWN_FLAGS = new Set([
   // what keeps parseArgs from demoting them to positional text.
   'accept', 'revoke', 'reason', 'list-accepted',
   'keep-open', // handoff: don't close earlier open handoffs
+  'full', 'cap', // context: lift the output cap / move it to <n> chars
 ]);
 
-const BOOLEAN_FLAGS = new Set(['preview', 'execute', 'latest', 'list', 'close', 'open', 'list-open', 'show', 'generate', 'include-archive', 'deep', 'refresh', 'share', 'json', 'all', 'strict', 'metrics', 'no-doc', 'list-accepted', 'keep-open']);
+const BOOLEAN_FLAGS = new Set(['preview', 'execute', 'latest', 'list', 'close', 'open', 'list-open', 'show', 'generate', 'include-archive', 'deep', 'refresh', 'share', 'json', 'all', 'strict', 'metrics', 'no-doc', 'list-accepted', 'keep-open', 'full']);
 
 // Flags that may legitimately be given more than once. A repeat ACCUMULATES
 // into an array instead of overwriting — the old behavior silently kept only the
@@ -81,7 +82,7 @@ function parseArgs(args) {
 
       if (!KNOWN_FLAGS.has(key)) {
         // Unknown flag: warn and pass through as positional (intentional — see
-        // the pass-through test and context.js's raw --full demotion check).
+        // the pass-through test).
         process.stderr.write(`pebbl: unknown flag ${arg} (ignored)\n`);
         positional.push(arg);
         continue;

@@ -178,10 +178,19 @@ describe('init: rendered AGENTS block, CLAUDE.md, narrative seed', () => {
   after(() => { process.chdir(origCwd); });
 
   it('renders the docs paragraph from handoff.docs / docs_dir', () => {
-    assert.match(renderAgentSection({}), /doc in `docs\/handoffs\/`/);
+    // Default: the rule that worked in Mobile-Home-Parks — pebbl is an index, every
+    // item points somewhere, no handoff doc unless the owner asks, --no-doc when
+    // pebbl asks. The caps the CLI enforces are stated, so the agent is not surprised.
+    const def = renderAgentSection({});
+    assert.match(def, /an index of decisions, dead ends and handoffs, not a place for documents/);
+    assert.match(def, /what, why, and where the detail lives \(a doc, a decision number, a file path, a commit\)/);
+    assert.match(def, /Every item is one line that points somewhere \(a doc, a decision number, a path, a commit\): at most 8 items per field and 160 characters per item/);
+    assert.match(def, /Don't write a handoff doc unless the owner asks for one; if pebbl asks for one, pass `--no-doc`/);
+    assert.match(def, /capped at 6,000 characters; `--full` lifts the cap/);
+    assert.doesNotMatch(def, /write it to a doc/);
     const never = renderAgentSection({ handoff: { docs: 'never' } });
-    assert.match(never, /Don't write a handoff doc/);
-    assert.doesNotMatch(never, /refuses/);
+    assert.match(never, /Don't write a handoff doc unless the owner asks for one\./);
+    assert.doesNotMatch(never, /--no-doc/);
     const always = renderAgentSection({ handoff: { docs: 'always', docs_dir: 'docs/13 handoffs/' } });
     assert.match(always, /doc in `docs\/13 handoffs\/`/);
     assert.match(always, /refuses a handoff without `--docs`/);

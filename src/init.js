@@ -12,6 +12,10 @@ const { detectRemoteVisibility } = require('./privacy-scan');
 // reader); shared init writes it so storeMode() classifies a fresh shared store
 // as 'events' without depending on a per-read git spawn.
 const { EVENTS_CANONICAL_MARKER } = require('./store-mode');
+// Rendered into the AGENTS block so the agent is told the exact limits that
+// will be enforced, each owned by the command that enforces it.
+const { CONTEXT_CAP } = require('./context');
+const { MAX_ITEMS, MAX_ITEM_CHARS } = require('./handoff');
 
 const AGENT_BEGIN = '<!-- pebbl:begin -->';
 const AGENT_END = '<!-- pebbl:end -->';
@@ -21,14 +25,19 @@ const AGENT_END = '<!-- pebbl:end -->';
 // block was one fixed text and a repo with a different handoff style had to
 // override it in CLAUDE.md (Mobile-Home-Parks: "This overrides the
 // detail-heavy handoff paragraph in AGENTS.md").
+// The doc-policy line. The default is the rule that worked in Mobile-Home-Parks:
+// pebbl is an index, every handoff item points at where the detail lives, and
+// no handoff doc gets written unless the owner asks for one — so when the
+// long-handoff guard asks, the agent answers --no-doc. `always` is the owner
+// asking for one on every handoff; `never` turns the guard off.
 function docsParagraph({ docs, docsDir }) {
-  if (docs === 'never') {
-    return 'Keep handoff items to one line each that point at where the detail lives. Don\'t write a handoff doc unless the owner asks for one.';
-  }
   if (docs === 'always') {
     return `Write the session's detail to a doc in \`${docsDir}/\` and link it with \`--docs <path>\`. pebbl refuses a handoff without \`--docs\` (or an explicit \`--no-doc\`).`;
   }
-  return `If the detail runs long, write it to a doc in \`${docsDir}/\` and link it with \`--docs <path>\`; the fields stay one-liners. pebbl refuses a long handoff that has neither \`--docs\` nor \`--no-doc\`.`;
+  if (docs === 'never') {
+    return 'Don\'t write a handoff doc unless the owner asks for one.';
+  }
+  return 'Don\'t write a handoff doc unless the owner asks for one; if pebbl asks for one, pass `--no-doc`.';
 }
 
 function renderAgentSection(config) {
@@ -38,11 +47,11 @@ ${AGENT_BEGIN}
 
 pebbl is this project's memory: an index of decisions, dead ends and handoffs, not a place for documents. Flags: \`pebbl <cmd> --help\`. Concepts: \`pebbl help <topic>\` (categories, tiers, compaction).
 
-**Start of every session:** run \`pebbl context\`. An open handoff's \`done\` is what the previous session finished, not you; its \`todo\` is what's left.
+**Start of every session:** run \`pebbl context\` (capped at ${CONTEXT_CAP.toLocaleString('en-US')} characters; \`--full\` lifts the cap). An open handoff's \`done\` is what the previous session finished, not you; its \`todo\` is what's left.
 
 **Before a non-trivial choice:** \`pebbl search "<area>"\`, so you don't re-litigate a settled decision.
 
-**Log the moment a choice is made or an approach fails**, one line: what, why, and where the detail lives (a doc, a file, a PR). Always pass \`--cat\` and \`--topic\`.
+**Log the moment a choice is made or an approach fails**, one line: what, why, and where the detail lives (a doc, a decision number, a file path, a commit). Always pass \`--cat\` and \`--topic\`.
 
 \`\`\`bash
 pebbl log "nightly import moved to 2am because the 1am run overlapped backups (see docs/ops.md)" --cat decision --topic import
@@ -50,7 +59,7 @@ pebbl log "nightly import moved to 2am because the 1am run overlapped backups (s
 
 \`--cat\`: \`decision\` a choice and why · \`steering\` a dead end, what to do instead · \`pattern\` a convention · \`structure\` where things live · \`integration\` an outside system · \`quality\` a target or measurement.
 
-**End of every session:** \`pebbl handoff "<one line>" --done "a; b" --todo "c; d" --topic <area>\`. One item per \`;\`, or repeat \`--done\` / \`--todo\` once per item. A new handoff closes the previous one: put its finished items in \`--done\` and open ones in \`--todo\`; any of its todos you list in neither carry over. Pass \`--keep-open\` only if another session is still working on it.
+**End of every session:** \`pebbl handoff "<one line>" --done "a; b" --todo "c; d" --topic <area>\`. One item per \`;\`, or repeat \`--done\` / \`--todo\` once per item. Every item is one line that points somewhere (a doc, a decision number, a path, a commit): at most ${MAX_ITEMS} items per field and ${MAX_ITEM_CHARS} characters per item, or pebbl refuses. A new handoff closes the previous one: put its finished items in \`--done\` and open ones in \`--todo\`; any of its todos you list in neither carry over. Pass \`--keep-open\` only if another session is still working on it.
 
 ${docsParagraph(handoffSettings(config))}
 

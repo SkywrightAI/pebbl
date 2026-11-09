@@ -377,11 +377,21 @@ Examples:
   pebbl recurrence --factory-guide --json
 `,
 
-  context: `pebbl context — recent entries with rationale warnings & git context
+  context: `pebbl context — the session-start read: open handoff, decisions, then the rest
+
+Order: the open handoff and its linked docs, then the decisions (RECENT), then
+the narrative, topic index and recent handoffs. Output is capped at 6000 chars,
+cut on a line with a note saying so, so a wake-up read stays bounded.
 
 Flags:
-  --cat <category>     filter by category
-  --topic <topic>      filter by topic
+  --full               lift the cap
+  --cap <n>            cap at n chars instead of 6000
+  --topic <topic>      entries on one topic (every foundation entry + on-topic
+                       component/detail entries, rerank order)
+  --cat <category>     filter by category (a flat list; --tier/--source too)
+  --tier <tier>        filter by tier
+  --source <source>    filter by source
+  --as-of <date>       memory as it was believed on that date
 `,
 
   handoff: `pebbl handoff "[summary]" — create a session handoff for the next agent
@@ -390,6 +400,7 @@ Flags:
   --done <items>       semicolon-separated completed items
   --todo <items>       semicolon-separated remaining items
   --blocked <items>    semicolon-separated blockers
+                       (each field: at most 8 items of at most 160 chars)
   --docs <paths>       comma-separated paths to rendered handoff doc(s) — the
                        readable detail the next agent opens; resurfaced on
                        --latest and \`pebbl context\`
@@ -411,6 +422,11 @@ lists in neither --done nor --todo carry over as "from #N: ...".
 Items split on top-level ';' (a ';' inside parentheses stays in its item), or
 repeat --done/--todo once per item. Each item materializes as its own block in
 handoffs.md so it is independently searchable.
+
+Each item is one line that points at where the detail lives (a doc, a decision
+number, a path, a commit): at most 8 items per field and 160 chars per item, or
+the handoff is refused. Carried todos count toward the todo cap; a longer legacy
+one carries clipped (its "from #N:" names the handoff with the full text).
 
 When a handoff must link a doc is set by handoff.docs in config.yml:
   when-heavy (default)  a long handoff needs --docs or --no-doc

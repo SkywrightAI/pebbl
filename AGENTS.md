@@ -98,25 +98,28 @@ Ask first: install/remove packages, git commit/push, edit `package.json` or
 - User-facing usage: [README.md](README.md)
 - Flag and category reference: [PEBBL.md](PEBBL.md)
 - Eval setup: [EVAL_HARNESS.md](EVAL_HARNESS.md)
-
 <!-- pebbl:begin -->
 ## Pebbl — Memory
 
-Local CLI for project memory. Flag details: `pebbl <cmd> --help`. Concepts: `pebbl help <topic>` (categories, tiers, compaction, file-layout, entry-ids).
+pebbl is this project's memory: an index of decisions, dead ends and handoffs, not a place for documents. Flags: `pebbl <cmd> --help`. Concepts: `pebbl help <topic>` (categories, tiers, compaction).
 
-**Every session, before code:** `pebbl context` (read open handoff + recent decisions). An open handoff's `done` field is what the *previous* agent finished — don't claim it as your own. The `todo` field is what's left for you. Close the handoff with `pebbl handoff --close` when you complete the remaining work.
+**Start of every session:** run `pebbl context` (capped at 6,000 characters; `--full` lifts the cap). An open handoff's `done` is what the previous session finished, not you; its `todo` is what's left.
 
-**Before any non-trivial decision:** `pebbl search "<area>"` — don't re-litigate prior choices.
+**Before a non-trivial choice:** `pebbl search "<area>"`, so you don't re-litigate a settled decision.
 
-**Log the moment a decision or failed approach lands.** Always include `--cat` and `--topic`. Always explain *why*, not just *what* — entries without rationale get auto-demoted.
+**Log the moment a choice is made or an approach fails**, one line: what, why, and where the detail lives (a doc, a decision number, a file path, a commit). Always pass `--cat` and `--topic`.
 
 ```bash
-pebbl log "chose bcrypt over argon2 because team already operates bcrypt in prod" --cat decision --topic auth
+pebbl log "nightly import moved to 2am because the 1am run overlapped backups (see docs/ops.md)" --cat decision --topic import
 ```
 
-**End of session:** `pebbl handoff "<summary>" --done "a; b" --todo "c; d" --topic <area>`. Use `;` to split atomic items — one run-on becomes one unsearchable blob.
+`--cat`: `decision` a choice and why · `steering` a dead end, what to do instead · `pattern` a convention · `structure` where things live · `integration` an outside system · `quality` a target or measurement.
 
-**A detail-heavy handoff needs a rendered doc.** When the end-of-session detail is large, write it to a readable file (e.g. `docs/handoffs/<topic>.md`) and link it with `--docs <path>` — the fields are for searchable one-liners, the doc is the readable detail. pebbl REFUSES a detail-heavy handoff that links neither `--docs` nor `--no-doc`, so the rendered doc reliably gets made instead of the detail being crammed into the fields or written somewhere and never linked. The linked doc resurfaces on `pebbl context`.
+**End of every session:** `pebbl handoff "<one line>" --done "a; b" --todo "c; d" --topic <area>`. One item per `;`, or repeat `--done` / `--todo` once per item. Every item is one line that points somewhere (a doc, a decision number, a path, a commit): at most 8 items per field and 160 characters per item, or pebbl refuses. A new handoff closes the previous one: put its finished items in `--done` and open ones in `--todo`; any of its todos you list in neither carry over. Pass `--keep-open` only if another session is still working on it.
 
-**Don't log:** routine code changes (the git hook captures commits), or anything obvious from reading the code.
+Don't write a handoff doc unless the owner asks for one; if pebbl asks for one, pass `--no-doc`.
+
+If a Stop hook holds your turn for unlogged changes, log what's missing, or say nothing this turn was worth keeping.
+
+**Don't log** routine code changes (the commit hook captures commits) or anything obvious from reading the code.
 <!-- pebbl:end -->

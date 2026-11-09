@@ -16,7 +16,7 @@ const { redact } = require('./privacy-scan');
 const { guardWrite } = require('./secret-guard');
 const { guardNames } = require('./name-guard');
 // Items split on top-level ';' only (a ';' inside parens stays in its item).
-const { splitItems } = require('./items');
+const { splitItems, clipItem } = require('./items');
 
 // DETAIL-DOC THRESHOLD: past this many chars of done+todo+blocked, a handoff is
 // "detail-heavy" and must link a rendered doc (--docs) or opt out (--no-doc). The
@@ -25,6 +25,21 @@ const { splitItems } = require('./items');
 // SHOULD have been a doc ran 2-3.5k). Deliberately generous so it only bites the
 // genuinely heavy ones, never a normal end-of-session note.
 const DETAIL_DOC_THRESHOLD = 1200;
+
+// ITEM CAPS: a handoff is an index, not a document. Past these an agent is
+// pasting the detail instead of pointing at it — loom's open handoffs carried
+// 1.5-4k chars per field, while Mobile-Home-Parks', written under its "one
+// line that points somewhere" rule, hold 2-3 items of a line each. Refused at
+// write time, before the insert, like the other guards. Carried todos count
+// toward the todo cap too, so the field stays bounded across a chain of
+// handoffs; an over-long legacy item carries clipped (its full text stays in
+// the handoff it came from, which the "from #N:" prefix names).
+const MAX_ITEMS = 8;
+const MAX_ITEM_CHARS = 160;
+const POINT_SOMEWHERE =
+  'A handoff is an index, not a document: each item is one line that points at where the\n' +
+  'detail lives (a doc, a decision number, a file path, a commit) — don\'t paste the detail\n' +
+  'here. Genuinely heavy context goes in a doc linked with --docs <path>.';
 
 module.exports = function handoff(args) {
   const { flags, positional } = parseArgs(args);
@@ -178,17 +193,10 @@ module.exports = function handoff(args) {
   let todo = joinField(flags.todo);
   let blocked = joinField(flags.blocked);
 
-  // Warn on fields that will materialize as one unsearchable block. Each field
-  // becomes ';'-split items on close — a long field with no separators stays a
-  // wall of text that search can't localize within.
-  checkFieldQuality(done, 'done');
-  checkFieldQuality(todo, 'todo');
-  checkFieldQuality(blocked, 'blocked');
-
   // Write-time secret BLOCK (root fix): refuse to persist an unmarked token-
-  // shape in any persisted field. Mirrors the checkFieldQuality hook's spot —
-  // BEFORE the INSERT — so a blocked handoff leaves the store unchanged. The
-  // .md redaction below is kept as defense-in-depth for anything already stored.
+  // shape in any persisted field. Sits BEFORE the INSERT, so a blocked handoff
+  // leaves the store unchanged. The .md redaction below is kept as defense-in-
+  // depth for anything already stored.
   guardWrite('handoff', [
     { name: 'summary', value: summary },
     { name: 'done', value: done },
@@ -206,6 +214,16 @@ module.exports = function handoff(args) {
     { name: 'todo', value: todo },
     { name: 'blocked', value: blocked },
   ], { opts: { pebblDir } }).map((f) => f.value);
+
+  // Item caps, checked on what will actually be stored (after the name
+  // substitution above), so the stored field is bounded by construction.
+  for (const [name, field] of [['done', done], ['todo', todo], ['blocked', blocked]]) {
+    const why = itemCapViolation(field, name);
+    if (why) {
+      console.error(`pebbl: ${why}\n${POINT_SOMEWHERE}`);
+      process.exit(1);
+    }
+  }
   const docs = flags.docs
     ? JSON.stringify(flags.docs.split(',').map(s => s.trim()).filter(Boolean))
     : null;
@@ -259,7 +277,9 @@ module.exports = function handoff(args) {
     ? lastHandoff.timestamp
     : new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
 
-  const sessionLogs = db.prepare("SELECT id FROM logs WHERE timestamp > ?").all(cutoff);
+  // Commit captures (source=hook) are left out: they say that code changed, not
+  // why, so on pickup they are noise next to what the session actually logged.
+  const sessionLogs = db.prepare("SELECT id FROM logs WHERE timestamp > ? AND source != 'hook'").all(cutoff);
   const sessionEntries = sessionLogs.map(r => r.id);
 
   // Auto-collect commits too
@@ -285,7 +305,19 @@ module.exports = function handoff(args) {
   const priors = flags['keep-open']
     ? []
     : db.prepare("SELECT * FROM handoffs WHERE status = 'open' ORDER BY id ASC").all();
-  const carried = carriedTodos(priors, [done, todo]);
+  const carried = carriedTodos(priors, [done, todo]).map((c) => clipItem(c, MAX_ITEM_CHARS));
+  const newTodos = splitItems(todo).length;
+  if (newTodos + carried.length > MAX_ITEMS) {
+    const ids = priors.map((p) => `#${p.id}`).join(', ');
+    console.error(
+      `pebbl: --todo would hold ${newTodos + carried.length} items (${newTodos} new + ${carried.length} ` +
+      `carried from open handoff${priors.length === 1 ? '' : 's'} ${ids}); the cap is ${MAX_ITEMS}.\n` +
+      `Unfinished todos that would carry:\n${carried.map((c) => `  - ${c}`).join('\n')}\n` +
+      `List the finished ones in --done, fold the rest into a doc or a decision and point at it,\n` +
+      `close a stale handoff with pebbl handoff --close <id>, or pass --keep-open to leave them open.`
+    );
+    process.exit(1);
+  }
   if (carried.length > 0) todo = joinField([todo, ...carried].filter(Boolean));
 
   // Insert the handoff
@@ -320,6 +352,9 @@ module.exports = function handoff(args) {
   if (carried.length > 0) {
     console.log(`Carried ${carried.length} unfinished todo${carried.length === 1 ? '' : 's'} into this one:`);
     for (const c of carried) console.log(`  - ${c}`);
+    if (carried.some((c) => c.endsWith('…'))) {
+      console.log(`  (an item ending in … was clipped to ${MAX_ITEM_CHARS} chars; the full text is in the handoff it names)`);
+    }
     console.log('  (list finished ones in --done next time and they stop carrying)');
   }
   console.log('──');
@@ -399,6 +434,22 @@ function carriedTodos(priors, newFields) {
   return out;
 }
 
+// Why a field breaks the item caps, as a short reason for the refusal, or null
+// when it is within them. Pure (no DB, no IO) so tests can exercise it directly.
+function itemCapViolation(field, name) {
+  const items = splitItems(field);
+  if (items.length > MAX_ITEMS) {
+    return `--${name} has ${items.length} items; the cap is ${MAX_ITEMS} per field.`;
+  }
+  const i = items.findIndex((it) => it.length > MAX_ITEM_CHARS);
+  if (i === -1) return null;
+  const it = items[i];
+  return (
+    `--${name} item ${i + 1} is ${it.length} chars; the cap is ${MAX_ITEM_CHARS} per item:\n` +
+    `  "${it.slice(0, 72).trimEnd()}…"`
+  );
+}
+
 // Well-formedness check for a handoff summary. Returns a SHORT reason string
 // when the summary is malformed (so create can reject it), or null when it is
 // fine. Deterministic + pure (no DB, no IO) so doctor and tests can reuse it.
@@ -444,18 +495,6 @@ function joinField(value) {
   return joined || null;
 }
 
-
-// Warn (non-fatal) when a field is long but has no separators, so it would
-// materialize as a single unsearchable block.
-const FIELD_BLOCK_WARN_CHARS = 280;
-function checkFieldQuality(field, name) {
-  if (field && field.length > FIELD_BLOCK_WARN_CHARS && splitItems(field).length < 2) {
-    console.error(
-      `pebbl: --${name} is ${field.length} chars with no ';' separators — it will ` +
-      `materialize as one big block search can't localize. Split it into ';'-separated items.`
-    );
-  }
-}
 
 // Regenerate handoffs.md from the handoffs table. Both open and closed handoffs
 // are included so search finds in-progress work too (open ones carry a
@@ -543,9 +582,15 @@ function displayHandoff(row, db) {
   const commitHashes = JSON.parse(row.session_commits || '[]');
 
   if (entryIds.length > 0) {
-    console.log(`\nSession entries (${entryIds.length}):`);
     const placeholders = entryIds.map(() => '?').join(',');
-    const entries = db.prepare(`SELECT * FROM logs WHERE id IN (${placeholders})`).all(...entryIds);
+    const all = db.prepare(`SELECT * FROM logs WHERE id IN (${placeholders})`).all(...entryIds);
+    // Commit captures (source=hook, the `[fleeting|uncategorized]` lines) say
+    // that code changed, not why — noise on pickup, so they are counted but
+    // not listed. Handoffs created now no longer collect them at all.
+    const entries = all.filter((e) => e.source !== 'hook');
+    const hidden = all.length - entries.length;
+    const note = hidden > 0 ? `, ${hidden} commit capture${hidden === 1 ? '' : 's'} not shown` : '';
+    console.log(`\nSession entries (${entries.length}${note}):`);
     for (const e of entries) {
       console.log(`  ${displayEntry(e)}`);
     }
@@ -562,7 +607,9 @@ function displayHandoff(row, db) {
 module.exports.displayHandoff = displayHandoff;
 module.exports.splitItems = splitItems;
 module.exports.joinField = joinField;
-module.exports.checkFieldQuality = checkFieldQuality;
 module.exports.materializeHandoffsMd = materializeHandoffsMd;
 module.exports.malformedSummary = malformedSummary;
 module.exports.carriedTodos = carriedTodos;
+module.exports.itemCapViolation = itemCapViolation;
+module.exports.MAX_ITEMS = MAX_ITEMS;
+module.exports.MAX_ITEM_CHARS = MAX_ITEM_CHARS;

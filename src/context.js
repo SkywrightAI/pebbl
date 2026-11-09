@@ -1,7 +1,8 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
-const { parseArgs } = require('./args');
+const util = require('util');
+const { parseArgs, assertIntegerFlags } = require('./args');
 const { requirePebblDir } = require('./find-pebbl');
 const { openDb, openReadDb, topicFilter, validAsOf, notCorrected, recordAccess } = require('./db');
 const { storeMode } = require('./store-mode');
@@ -13,6 +14,43 @@ const { splitItems } = require('./items');
 const { isThinEntry } = require('./detect-thin');
 const { readNarrative, readRefs, readUpdatedTimestamp, updateRefs } = require('./narrative');
 const { mirrorMachines, mirrorLogs, mirrorHandoffs, stripHandoffPrefix } = require('./mirror');
+
+// ── output cap ───────────────────────────────────────────────────────────────
+//
+// `pebbl context` is the first read of every session and the baton a long-
+// running loop picks up on every wake, so it has to be bounded: one store's
+// 4k-char entries otherwise eat the context window before the agent does
+// anything (loom's printed 23k chars). Everything the command prints goes
+// through out() into a buffer; the entry point flushes it through capOutput(),
+// which keeps the first CONTEXT_CAP chars (cut on a line boundary) and says
+// what it dropped. --full lifts the cap, --cap <n> moves it. The section order
+// is what makes the cut safe: the open handoff and its linked docs first, then
+// the decisions, then the rest.
+const CONTEXT_CAP = 6000;
+let outBuf = null;
+function out(...args) {
+  const line = util.format(...args);
+  if (outBuf) outBuf.push(line);
+  else console.log(line);
+}
+
+// The capped rendering of `text`: unchanged when it fits (or cap is not finite),
+// else a prefix that leaves room for a one-line trailer saying how to see the
+// rest. The cut lands on a line boundary unless that would throw away more than
+// a fifth of the cap (one 4k-char entry straddling the boundary would otherwise
+// shrink a 6000-char read to 4000); then it lands inside the line. The result
+// never exceeds `cap` chars.
+function capOutput(text, cap) {
+  if (!Number.isFinite(cap) || text.length <= cap) return text;
+  const trailer =
+    `… capped at ${cap} chars (${text.length} in full). ` +
+    "pebbl context --full lifts the cap; pebbl search '<area>' finds the rest.";
+  if (trailer.length >= cap) return trailer.slice(0, cap);
+  const budget = cap - trailer.length - 1;
+  let cut = text.lastIndexOf('\n', budget);
+  if (cut <= 0 || budget - cut > cap / 5) cut = budget;
+  return text.slice(0, cut).trimEnd() + '\n' + trailer;
+}
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -129,40 +167,40 @@ function showOpenHandoff(db, pebblDir) {
 
   // Render the newest open in full — that is "today's" working handoff.
   const newest = opens[0];
-  console.log(`── Open handoff from previous agent (#${newest.id}, ${hoursAgoText(newest.timestamp)}) ──`);
-  console.log(newest.summary);
-  if (newest.done)    console.log(`  previous agent completed: ${newest.done}`);
-  if (newest.todo)    console.log(`  remaining for you:        ${newest.todo}`);
-  if (newest.blocked) console.log(`  blocked:                  ${newest.blocked}`);
-  if (newest.topics)  console.log(`  topics:                   ${newest.topics}`);
+  out(`── Open handoff from previous agent (#${newest.id}, ${hoursAgoText(newest.timestamp)}) ──`);
+  out(newest.summary);
+  if (newest.done)    out(`  previous agent completed: ${newest.done}`);
+  if (newest.todo)    out(`  remaining for you:        ${newest.todo}`);
+  if (newest.blocked) out(`  blocked:                  ${newest.blocked}`);
+  if (newest.topics)  out(`  topics:                   ${newest.topics}`);
   // Resurface the rendered handoff doc(s) so the readable detail is never orphaned —
   // the whole point of linking one is that the NEXT agent finds it on pickup.
   if (newest.docs) {
     const docList = JSON.parse(newest.docs || '[]');
     if (docList.length) {
-      console.log(`  📄 full detail:           ${docList.join(', ')} — read this first`);
+      out(`  📄 full detail:           ${docList.join(', ')} — read this first`);
     }
   }
   if (hoursAgo(newest.timestamp) >= staleHours) {
-    console.log(`  ⚠ stale: open ${hoursAgo(newest.timestamp)}h (≥ ${staleHours}h threshold)`);
+    out(`  ⚠ stale: open ${hoursAgo(newest.timestamp)}h (≥ ${staleHours}h threshold)`);
   }
-  console.log('  → when you finish the remaining work, run: pebbl handoff --close');
+  out('  → when you finish the remaining work, run: pebbl handoff --close');
 
   // One-line rollup for the rest, so stacked opens are visible and drainable.
   if (opens.length > 1) {
     const oldest = opens[opens.length - 1];
-    console.log(
+    out(
       `  ⚠ ${opens.length} open handoffs (oldest #${oldest.id}, ${hoursAgo(oldest.timestamp)}h ago) ` +
       `— run pebbl handoff --list-open`
     );
     const stale = opens.filter(h => hoursAgo(h.timestamp) >= staleHours);
     if (stale.length > 0) {
       const ids = stale.map(h => `#${h.id}`).join(', ');
-      console.log(`  ⚠ ${stale.length} stale (≥ ${staleHours}h): ${ids}`);
+      out(`  ⚠ ${stale.length} stale (≥ ${staleHours}h): ${ids}`);
     }
   }
-  console.log('──');
-  console.log('');
+  out('──');
+  out('');
 }
 
 function showRecentHandoffs(db) {
@@ -176,29 +214,29 @@ function showRecentHandoffs(db) {
 
   const trunc = (s, n) => (s.length > n ? s.slice(0, n - 1).trimEnd() + '…' : s);
 
-  console.log('--- RECENT HANDOFFS ---');
+  out('--- RECENT HANDOFFS ---');
   for (const row of rows) {
     const date = relativeDate(row.closed_at || row.timestamp);
-    console.log(`  #${row.id} (${date}) ${trunc(row.summary, 90)}`);
+    out(`  #${row.id} (${date}) ${trunc(row.summary, 90)}`);
     const todos = splitItems(row.todo);
-    todos.slice(0, 2).forEach(t => console.log(`    todo: ${trunc(t, 90)}`));
-    if (todos.length > 2) console.log(`    … +${todos.length - 2} more todo (pebbl handoff --latest)`);
+    todos.slice(0, 2).forEach(t => out(`    todo: ${trunc(t, 90)}`));
+    if (todos.length > 2) out(`    … +${todos.length - 2} more todo (pebbl handoff --latest)`);
   }
-  console.log('');
+  out('');
 }
 
 function showEntryWithThinCheck(row, cwd) {
-  console.log(displayEntry(row));
+  out(displayEntry(row));
   const msg = row.message || '';
   if (isThinEntry(msg)) {
     const commits = findRelatedCommits(cwd, msg);
     for (const c of commits) {
-      console.log(`  └─ git: ${c.hash} ${c.message}`);
+      out(`  └─ git: ${c.hash} ${c.message}`);
     }
     if (commits.length > 0) {
-      console.log('  ⚠ no explicit rationale found — commit shows implementation detail, not decision reasoning');
+      out('  ⚠ no explicit rationale found — commit shows implementation detail, not decision reasoning');
     } else {
-      console.log('  ⚠ no explicit rationale found — consider correcting with: pebbl log "because..." --corrects ' + row.id);
+      out('  ⚠ no explicit rationale found — consider correcting with: pebbl log "because..." --corrects ' + row.id);
     }
   }
 }
@@ -214,17 +252,17 @@ function showMirrors(pebblDir) {
     const logs = mirrorLogs(pebblDir, machine).slice(0, 5);
     if (opens.length === 0 && logs.length === 0) continue;
 
-    console.log(`--- MIRROR: ${machine} ---`);
+    out(`--- MIRROR: ${machine} ---`);
     for (const h of opens) {
-      console.log(`  open handoff: ${stripHandoffPrefix(h.message)}`);
+      out(`  open handoff: ${stripHandoffPrefix(h.message)}`);
     }
     for (const e of logs) {
-      console.log('  ' + displayEntry({
+      out('  ' + displayEntry({
         tier: e.tier, category: e.cat, timestamp: e.timestamp,
         message: e.message, topics: e.topics,
       }));
     }
-    console.log('');
+    out('');
   }
 }
 
@@ -244,7 +282,7 @@ function showCompactionNotifications(db, pebblDir) {
 
   for (const [key, entries] of groups) {
     const topic = key.split('/')[1];
-    console.log(`[pebbl] ${entries.length} entries on '${topic}' ready for compaction. Run: pebbl compact --preview`);
+    out(`[pebbl] ${entries.length} entries on '${topic}' ready for compaction. Run: pebbl compact --preview`);
   }
 
   // Compaction-on-release: a SOFT reminder only (design Q2=A). Now that
@@ -254,7 +292,7 @@ function showCompactionNotifications(db, pebblDir) {
   // exit code. The fold dedups overlapping rollups, so skipping it is "ugly,
   // not broken." Harden later only if duplicate rollups appear in practice.
   if (groups.size > 0) {
-    console.log('[pebbl] tip: compaction is append-only now — consider running it before you release/share this store.');
+    out('[pebbl] tip: compaction is append-only now — consider running it before you release/share this store.');
   }
 }
 
@@ -296,7 +334,40 @@ function contextDefault(pebblDir, db) {
 
   showOpenHandoff(db, pebblDir);
 
-  // ── Section 1: NARRATIVE ──
+  // ── Section 1: RECENT (the decisions) ──
+  //
+  // First after the open handoff, before the narrative and topic index, so the
+  // output cap (see capOutput) drops the index before it drops a decision.
+  //
+  // Ordering CHANGED (v0.7): rerank rankCandidates replaces the old `id DESC`
+  // (newest-first) cut. This is the live read-path wiring — what an entry IS
+  // (importance/usage/recency) now decides what surfaces here, not just when it
+  // was written. The current-belief filter (valid_to IS NULL, via notCorrected)
+  // and the non-fleeting tier set are kept; rerank only reorders the same
+  // candidate set. Section keeps the --- RECENT --- label (it is still the
+  // "what should I look at" section) even though it is no longer strictly
+  // newest-first. relevance is flat/0 here (context does no relevance ranking), as expected.
+  const recentCandidates = db.prepare(`
+    SELECT id, timestamp, source, category, tier, message, topics,
+           importance, access_count, last_accessed
+    FROM logs
+    WHERE tier IN ('foundation', 'component', 'detail')
+      AND ${notCorrected()}
+  `).all();
+  const recentRows = rankCandidates(recentCandidates).slice(0, 5);
+
+  out('--- RECENT ---');
+  if (recentRows.length === 0) {
+    out('  (no entries yet)');
+  } else {
+    for (const row of recentRows) {
+      showEntryWithThinCheck(row, cwd);
+    }
+  }
+  out('---');
+  out('');
+
+  // ── Section 2: NARRATIVE ──
 
   const narrative = readNarrative(pebblDir);
   if (narrative) {
@@ -307,26 +378,26 @@ function contextDefault(pebblDir, db) {
       .replace(/<!--[\s\S]*?-->/g, '')
       .replace(/^# Project Narrative\n*/m, '')
       .trim();
-    console.log('--- NARRATIVE ---');
-    console.log(cleaned);
-    if (dateStr) console.log(`(updated: ${dateStr})`);
+    out('--- NARRATIVE ---');
+    out(cleaned);
+    if (dateStr) out(`(updated: ${dateStr})`);
 
     // Check for drift
     const driftResult = checkDrift(pebblDir, db);
     if (driftResult.drift > 0) {
       // Auto-update refs if corrections were made
       updateRefs(pebblDir, db);
-      console.log(`[pebbl] Narrative may be outdated: ${driftResult.reasons.join('; ')}`);
-      console.log('  Update the text: pebbl narrative "<updated text>"');
+      out(`[pebbl] Narrative may be outdated: ${driftResult.reasons.join('; ')}`);
+      out('  Update the text: pebbl narrative "<updated text>"');
     }
 
-    console.log('');
+    out('');
   } else {
-    console.log('hint: no project narrative set. Run: pebbl narrative "..."');
-    console.log('');
+    out('hint: no project narrative set. Run: pebbl narrative "..."');
+    out('');
   }
 
-  // ── Section 2: TOPIC INDEX ──
+  // ── Section 3: TOPIC INDEX ──
 
   // Query: non-fleeting entries by topic+tier, excluding corrected entries
   const topicRows = db.prepare(`
@@ -366,50 +437,20 @@ function contextDefault(pebblDir, db) {
   if (sortedTopics.length > 0) {
     const totalAreas = sortedTopics.length;
     const totalDecisions = sortedTopics.reduce((sum, [, v]) => sum + v.foundation + v.component, 0);
-    console.log(`--- TOPICS (${totalAreas} areas, ${totalDecisions} decisions) ---`);
+    out(`--- TOPICS (${totalAreas} areas, ${totalDecisions} decisions) ---`);
     for (const [topic, data] of sortedTopics) {
       const parts = [];
       if (data.foundation > 0) parts.push(`${data.foundation} foundation`);
       if (data.component > 0) parts.push(`${data.component} component`);
       const dateStr = data.maxTs ? relativeDate(data.maxTs) : '';
-      console.log(`  ${topic.padEnd(14)}${parts.join(', ')} decisions (updated ${dateStr})`);
+      out(`  ${topic.padEnd(14)}${parts.join(', ')} decisions (updated ${dateStr})`);
     }
-    console.log('');
+    out('');
   } else {
-    console.log('--- TOPICS ---');
-    console.log('  (no topics yet)');
-    console.log('');
+    out('--- TOPICS ---');
+    out('  (no topics yet)');
+    out('');
   }
-
-  // ── Section 3: RECENT ACTIVITY ──
-  //
-  // Ordering CHANGED (v0.7): rerank rankCandidates replaces the old `id DESC`
-  // (newest-first) cut. This is the live read-path wiring — what an entry IS
-  // (importance/usage/recency) now decides what surfaces here, not just when it
-  // was written. The current-belief filter (valid_to IS NULL, via notCorrected)
-  // and the non-fleeting tier set are kept; rerank only reorders the same
-  // candidate set. Section keeps the --- RECENT --- label (it is still the
-  // "what should I look at" section) even though it is no longer strictly
-  // newest-first. relevance is flat/0 here (context does no relevance ranking), as expected.
-  const recentCandidates = db.prepare(`
-    SELECT id, timestamp, source, category, tier, message, topics,
-           importance, access_count, last_accessed
-    FROM logs
-    WHERE tier IN ('foundation', 'component', 'detail')
-      AND ${notCorrected()}
-  `).all();
-  const recentRows = rankCandidates(recentCandidates).slice(0, 5);
-
-  console.log('--- RECENT ---');
-  if (recentRows.length === 0) {
-    console.log('  (no entries yet)');
-  } else {
-    for (const row of recentRows) {
-      showEntryWithThinCheck(row, cwd);
-    }
-  }
-  console.log('---');
-  console.log('');
 
   // NO recordAccess here (FIX 1). The default `pebbl context` dump is a broad
   // session-start render — printing the top-5 RECENT slate is NOT the user
@@ -462,15 +503,15 @@ function contextFull(pebblDir, db, flags) {
   const candidates = db.prepare(sql).all(...params);
   const rows = rankCandidates(candidates).slice(0, 10);
 
-  console.log('--- PROJECT MEMORY ---');
+  out('--- PROJECT MEMORY ---');
   if (rows.length === 0) {
-    console.log('(no entries yet)');
+    out('(no entries yet)');
   } else {
     for (const row of rows) {
       showEntryWithThinCheck(row, cwd);
     }
   }
-  console.log('---');
+  out('---');
 
   // NO recordAccess here (FIX 1). --full is a broad memory dump (up to 10 rows,
   // optionally filtered), the session-start "show me everything" view — not a
@@ -519,15 +560,15 @@ function contextTopic(pebblDir, db, topic, flags) {
   // on-topic detail). The current-belief filter is unchanged on every fetch.
   const allRows = rankCandidates([...foundationRows, ...componentRows, ...detailRows]);
 
-  console.log(`--- TOPIC: ${topic} ---`);
+  out(`--- TOPIC: ${topic} ---`);
   if (allRows.length === 0) {
-    console.log('(no entries)');
+    out('(no entries)');
   } else {
     for (const row of allRows) {
       showEntryWithThinCheck(row, cwd);
     }
   }
-  console.log('---');
+  out('---');
 
   // recordAccess fires HERE (FIX 1): `pebbl context --topic <x>` is the targeted
   // retrieval path — the user asking "what do we know about X" and getting the
@@ -582,21 +623,31 @@ function contextAsOf(pebblDir, db, date, flags) {
   // keeps its tier-then-id ordering (rerank is wired only into the current-
   // belief reads per this slice) and does NOT increment access_count (counting a
   // historical reconstruction would distort the live usage signal).
-  console.log(`--- MEMORY AS OF ${date} ---`);
+  out(`--- MEMORY AS OF ${date} ---`);
   if (rows.length === 0) {
-    console.log('(nothing was believed as of that date)');
+    out('(nothing was believed as of that date)');
   } else {
     for (const row of rows) {
       showEntryWithThinCheck(row, cwd);
     }
   }
-  console.log('---');
+  out('---');
 }
 
 // ── exported entry point ─────────────────────────────────────────────────────
 
 module.exports = function context(args) {
-  const { flags } = parseArgs(args);
+  const parsed = parseArgs(args);
+  const { flags } = parsed;
+  // --cap <n>: a positive integer. Anything else errors out loud rather than
+  // parsing to NaN and silently lifting the cap.
+  assertIntegerFlags(parsed, ['cap']);
+  if (flags.cap !== undefined && parseInt(flags.cap, 10) < 1) {
+    console.error(`pebbl: --cap expects a positive integer, got "${flags.cap}"`);
+    process.exit(1);
+  }
+  const cap = flags.full ? Infinity : flags.cap !== undefined ? parseInt(flags.cap, 10) : CONTEXT_CAP;
+
   const pebblDir = requirePebblDir();
   ensureProjectFiles(pebblDir);
   // Wire 2 — reads-from-fold: in an events-mode store this opens the folded
@@ -607,24 +658,34 @@ module.exports = function context(args) {
   // columns) as the migrated db.
   const db = openReadDb(pebblDir);
 
-  // Check raw args for --full since it is not in KNOWN_FLAGS
-  const isFull = args.includes('--full');
+  // Every mode renders into the buffer and the flush applies the cap. The
+  // finally keeps a partial render visible if a section throws, as the
+  // unbuffered output used to be.
+  outBuf = [];
+  try {
+    if (flags['as-of']) {
+      contextAsOf(pebblDir, db, flags['as-of'], flags);
+    } else if (flags.topic) {
+      contextTopic(pebblDir, db, flags.topic, flags);
+    } else if (flags.cat || flags.tier || flags.source) {
+      // Filter flags without --topic: the flat, filtered list.
+      contextFull(pebblDir, db, flags);
+    } else {
+      // --full alone is this same view with the cap lifted, not a different one.
+      contextDefault(pebblDir, db);
+    }
 
-  if (flags['as-of']) {
-    contextAsOf(pebblDir, db, flags['as-of'], flags);
-  } else if (isFull) {
-    contextFull(pebblDir, db, flags);
-  } else if (flags.topic) {
-    contextTopic(pebblDir, db, flags.topic, flags);
-  } else if (flags.cat || flags.tier || flags.source) {
-    // Filter flags without --topic or --full fall through to full view
-    // for backward compatibility
-    contextFull(pebblDir, db, flags);
-  } else {
-    contextDefault(pebblDir, db);
+    // Search-first nudge: context shows the curated index, but superseded or
+    // corrected decisions that grep can't surface live in the search corpus.
+    out("before deciding in an area you don't see above, run pebbl search '<area>' — catches superseded choices grep can't");
+  } finally {
+    const text = outBuf.join('\n');
+    outBuf = null;
+    // console.log, not process.stdout.write: in-process callers (and tests) capture
+    // output by swapping console.log, exactly as they did before the buffer.
+    if (text) console.log(capOutput(text, cap));
   }
-
-  // Search-first nudge: context shows the curated index, but superseded or
-  // corrected decisions that grep can't surface live in the search corpus.
-  console.log("before deciding in an area you don't see above, run pebbl search '<area>' — catches superseded choices grep can't");
 };
+
+module.exports.capOutput = capOutput;
+module.exports.CONTEXT_CAP = CONTEXT_CAP;

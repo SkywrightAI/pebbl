@@ -1,7 +1,7 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { splitItems } = require('../src/items');
+const { splitItems, clipItem } = require('../src/items');
 
 test('splitItems: splits on top-level ;', () => {
   assert.deepStrictEqual(splitItems('a; b ;c'), ['a', 'b', 'c']);
@@ -41,4 +41,21 @@ test('splitItems: an unbalanced ) does not swallow the rest', () => {
 
 test('splitItems: an unclosed ( falls back to plain splitting', () => {
   assert.deepStrictEqual(splitItems('see (note; a; b'), ['see (note', 'a', 'b']);
+});
+
+test('clipItem: short items pass through, long ones end in … at exactly max', () => {
+  assert.strictEqual(clipItem('short', 160), 'short');
+  const long = 'a'.repeat(300);
+  assert.strictEqual(clipItem(long, 160).length, 160);
+  assert.ok(clipItem(long, 160).endsWith('…'));
+  assert.strictEqual(clipItem(null, 10), '');
+});
+
+test('clipItem: never leaves a bracket or quote open, so the field still splits right', () => {
+  const s = 'fix the gate (see jig for ' + 'x'.repeat(200) + ') and more';
+  const out = clipItem(s, 40);
+  assert.strictEqual(out, 'fix the gate…');
+  assert.deepStrictEqual(splitItems(out + '; next (a; b)'), [out, 'next (a; b)']);
+  const q = 'say "hello ' + 'y'.repeat(100);
+  assert.strictEqual(clipItem(q, 30), 'say…');
 });
