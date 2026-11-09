@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const { parseArgs } = require('./args');
 const { requirePebblDir } = require('./find-pebbl');
-const { openDb, openReadDb } = require('./db');
+const { openDb, openReadDb, openHandoffRowByKey } = require('./db');
 const { storeMode } = require('./store-mode');
 const { ensureProjectFiles, loadConfig, handoffSettings } = require('./rubric');
 const { makeHandoffOpenEvent, makeHandoffCloseEvent, findHandoffOpenEid, appendEventBatch, readEvents } = require('./events');
@@ -406,18 +406,14 @@ module.exports = function handoff(args) {
 //
 // `row` is what the read side returned. From db.sqlite (a legacy store) it is
 // the row to update, by id, as before. From the folded view (events-mode,
-// opts.fromView) the matching db.sqlite row is found by (timestamp, summary):
-// the view's integer id is a per-rebuild artifact that can name a DIFFERENT
-// db row (loom: view #1 is a 2026-07 handoff, db #1 the one written on
-// 2026-11-09), and a handoff written on another clone, or before this
-// db.sqlite existed, has no row here at all — then there is nothing to update
-// and the handoff-close event IS the close.
+// opts.fromView) the matching db.sqlite row is found by (timestamp, summary)
+// — db.js openHandoffRowByKey — because the view's integer id is a
+// per-rebuild artifact that can name a DIFFERENT db row (loom: view #1 is a
+// 2026-07 handoff, db #1 the one written on 2026-11-09), and a handoff written
+// on another clone, or before this db.sqlite existed, has no row here at all —
+// then there is nothing to update and the handoff-close event IS the close.
 function closeHandoffRow(db, pebblDir, row, ts, { fromView = false, events = null } = {}) {
-  const target = fromView
-    ? db.prepare(
-        "SELECT * FROM handoffs WHERE timestamp = ? AND summary = ? AND status = 'open' ORDER BY id DESC LIMIT 1"
-      ).get(row.timestamp, row.summary)
-    : row;
+  const target = fromView ? openHandoffRowByKey(db, row) : row;
 
   let demoted = 0;
   if (target) {
@@ -443,7 +439,8 @@ function closeHandoffRow(db, pebblDir, row, ts, { fromView = false, events = nul
     const eid = findHandoffOpenEid(pebblDir, row, events);
     if (eid) closeEvent = makeHandoffCloseEvent(pebblDir, { ts, handoff: eid });
   } catch {
-    // unreadable events log: db.sqlite already holds the close
+    // unreadable events log: nothing to append; db.sqlite holds the close
+    // wherever it holds the row
   }
   return { demoted, closeEvent };
 }

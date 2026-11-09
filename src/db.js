@@ -135,7 +135,23 @@ function openReadDb(pebblDir) {
   return openDb(pebblDir);
 }
 
-module.exports = { openDb, openReadDb };
+// The db.sqlite row for a handoff the READ side returned, found by (timestamp,
+// summary), never by id. In an events-mode store the read view's integer id is
+// a per-rebuild artifact of the fold that can name a DIFFERENT db.sqlite row
+// (loom: view #1 was a 2026-07 handoff, db #1 the one written on 2026-11-09),
+// and neither table carries the event's eid — but a handoff's timestamp and
+// summary are written identically to its db row and its handoff-open event, so
+// together they identify it. Only an OPEN row is returned: the caller is
+// closing it, and a row already closed here has nothing left to update.
+// undefined when this db.sqlite never held the handoff (written on another
+// clone, or before this db.sqlite existed).
+function openHandoffRowByKey(db, { timestamp, summary }) {
+  return db.prepare(
+    "SELECT * FROM handoffs WHERE timestamp = ? AND summary = ? AND status = 'open' ORDER BY id DESC LIMIT 1"
+  ).get(timestamp, summary);
+}
+
+module.exports = { openDb, openReadDb, openHandoffRowByKey };
 
 // ── FTS5 full-text search index (M1) ─────────────────────────────────────────
 //

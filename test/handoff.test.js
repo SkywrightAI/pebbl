@@ -994,6 +994,11 @@ describe('handoff - events-mode store: opens that live only in the fold', () => 
     const ctx = spawnSync(BIN, ['context'], { cwd: dir, encoding: 'utf8', env }).stdout;
     assert.match(ctx, /Open handoff from previous agent \(#2/);
     assert.doesNotMatch(ctx, /open handoffs \(oldest/, 'context no longer reports stacked opens');
+    // handoffs.md is rendered from the fold, not from db.sqlite (whose only row
+    // is 'second wake' as #1, open): the fold's #1 is the closed prior.
+    const md = fs.readFileSync(path.join(dir, '.pebbl', 'handoffs.md'), 'utf8');
+    assert.match(md, /handoff #1: first wake\n<!-- handoff:1 field:summary topic: status:closed -->/);
+    assert.match(md, /handoff #2: second wake\n<!-- handoff:2 field:summary topic: status:open -->/);
   });
 
   it('--list-open and --list show a fold-only open; --latest shows it', () => {
@@ -1072,6 +1077,58 @@ describe('handoff - events-mode store: opens that live only in the fold', () => 
     assert.deepEqual(folded(b).map((h) => [h.summary, h.status]), [['from clone A', 'closed'], ['from clone B', 'open']]);
     assert.match(spawnSync(BIN, ['handoff', '--list-open'], { cwd: b, encoding: 'utf8', env }).stdout, /^#2 \[open\].*from clone B/m);
     assert.doesNotMatch(spawnSync(BIN, ['handoff', '--list-open'], { cwd: b, encoding: 'utf8', env }).stdout, /from clone A/);
+  });
+
+  it('--latest resolves a fold handoff\'s session entries against the view, not db.sqlite', () => {
+    const dir = sharedProject();
+    const pebblDir = path.join(dir, '.pebbl');
+    const { makeAppendEvent, makeHandoffOpenEvent, appendEventBatch } = require('../src/events');
+    // What a teammate's clone (or the migration) wrote: an entry, and a handoff
+    // whose session_entries name it by eid. The fold maps that eid to the
+    // view's log #1.
+    const entry = makeAppendEvent(pebblDir, {
+      ts: '2026-01-01T00:00:00.000Z', category: 'decision', tier: 'detail',
+      message: 'teammate chose redis because fanout', topics: 'core', source: 'agent',
+    });
+    const open = makeHandoffOpenEvent(pebblDir, { ts: '2026-01-02T00:00:00.000Z', summary: 'teammate wake', todo: 'a thing', source: 'agent' });
+    open.session_entries = [entry.eid];
+    appendEventBatch(pebblDir, [entry, open]);
+    // This machine's db.sqlite log #1 is a different entry.
+    const lg = spawnSync(BIN, ['log', 'local only note', '--cat', 'pattern', '--topic', 'x'], { cwd: dir, encoding: 'utf8', env });
+    assert.equal(lg.status, 0, lg.stderr);
+    const r = run(dir, ['--latest']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /Handoff #1 \[OPEN\]/);
+    assert.match(r.stdout, /Session entries \(1\):\n  \[detail\|decision\] 2026-01-01 — teammate chose redis because fanout/);
+    assert.doesNotMatch(r.stdout, /local only note/);
+  });
+
+  it('a migrated store (legacy-db.sqlite): the next handoff closes the minted opens; db.sqlite #1 is the new handoff and stays open', () => {
+    // loom's shape on 2026-11-09: a legacy store migrated with
+    // migrate-to-events --apply, so every old handoff is a minted handoff-open
+    // event in the fold and the fresh db.sqlite starts at row #1.
+    const dir = initProject();
+    dirs.push(dir);
+    assert.equal(run(dir, ['legacy one', '--todo', 'wire the judge']).status, 0);
+    assert.equal(run(dir, ['legacy two', '--todo', 'call the county', '--keep-open']).status, 0);
+    const m = spawnSync(BIN, ['migrate-to-events', '--apply'], { cwd: dir, encoding: 'utf8', env });
+    assert.equal(m.status, 0, m.stderr);
+    assert.equal(storeMode(path.join(dir, '.pebbl')), 'events');
+    assert.ok(!fs.existsSync(path.join(dir, '.pebbl', 'db.sqlite')), 'the migration renamed db.sqlite away');
+    assert.match(run(dir, ['--list-open']).stdout, /#2 \[open\].*legacy two\n#1 \[open\].*legacy one/);
+    const r = run(dir, ['post-migration wake', '--done', 'wire the judge', '--todo', 'review it']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /Handoff #3 created/);
+    assert.match(r.stdout, /Closed earlier handoffs: #1, #2/);
+    assert.match(r.stdout, /from #2: call the county/);
+    assert.deepEqual(folded(dir).map((h) => [h.summary, h.status]),
+      [['legacy one', 'closed'], ['legacy two', 'closed'], ['post-migration wake', 'open']]);
+    // The fresh db.sqlite holds only the new handoff — as row #1, the id the
+    // fold gave 'legacy one' — and it is still open.
+    assert.deepEqual(dbRows(dir).map((h) => [h.id, h.summary, h.status]), [[1, 'post-migration wake', 'open']]);
+    const ctx = spawnSync(BIN, ['context'], { cwd: dir, encoding: 'utf8', env }).stdout;
+    assert.match(ctx, /Open handoff from previous agent \(#3/);
+    assert.doesNotMatch(ctx, /open handoffs \(oldest/);
   });
 });
 
