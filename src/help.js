@@ -425,8 +425,9 @@ handoffs.md so it is independently searchable.
 
 Each item is one line that points at where the detail lives (a doc, a decision
 number, a path, a commit): at most 8 items per field and 160 chars per item, or
-the handoff is refused. Carried todos count toward the todo cap; a longer legacy
-one carries clipped (its "from #N:" names the handoff with the full text).
+the handoff is refused. Carried todos count toward the todo cap; one that fit the
+cap carries whole, a longer legacy one carries with its text clipped to 160 (its
+"from #N:" names the handoff with the full text).
 
 When a handoff must link a doc is set by handoff.docs in config.yml:
   when-heavy (default)  a long handoff needs --docs or --no-doc
@@ -558,7 +559,7 @@ Commands:
   liveness    detect silent fails: register a cadence, check what is OVERDUE
   heartbeat   beat a liveness signal for a job (on verified success)
   recurrence  the band-aid detector: frequency vs resistance, altitude observed
-  context     recent entries with git context
+  context     the session-start read: open handoff, decisions, the rest (capped)
   handoff     create a session handoff
   narrative   view or set project narrative
   compact     compact entries

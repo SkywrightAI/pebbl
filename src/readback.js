@@ -544,9 +544,10 @@ function printFactoryGuide(asJson) {
 // ── CLI ──────────────────────────────────────────────────────────────────────
 //
 // We parse our OWN flags from raw argv (not src/args.js) because --factory-guide
-// / --top are not in args.js's KNOWN_FLAGS and this task must not touch args.js;
-// the same raw-arg approach context.js uses for --full. --json and --top are
-// honored; the positional is the spec FILE path, or `-` for stdin.
+// / --top are not in args.js's KNOWN_FLAGS and this task must not touch args.js
+// (the raw-arg approach context.js used for --full before that flag was
+// registered). --json and --top are honored; the positional is the spec FILE
+// path, or `-` for stdin.
 function parseReadbackArgs(args) {
   const out = { json: false, factoryGuide: false, top: null, specPath: null };
   for (let i = 0; i < args.length; i++) {

@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const util = require('util');
-const { parseArgs, assertIntegerFlags } = require('./args');
+const { parseArgs, assertCompleteFlags, assertIntegerFlags } = require('./args');
 const { requirePebblDir } = require('./find-pebbl');
 const { openDb, openReadDb, topicFilter, validAsOf, notCorrected, recordAccess } = require('./db');
 const { storeMode } = require('./store-mode');
@@ -156,9 +156,11 @@ function showOpenHandoff(db, pebblDir) {
   const hasHandoffsTable = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='handoffs'").get();
   if (!hasHandoffsTable) return;
 
-  // The handoffs table permits unlimited open rows and creating a handoff never
-  // closes priors, so opens stack. Fetch ALL of them (newest first) rather than
-  // a single LIMIT 1 slot that buries older opens with no count or signal.
+  // A new handoff closes its priors now, but opens can still stack: a handoff
+  // written with --keep-open, a store from before auto-close, or an events-mode
+  // store whose older opens live only in the fold. Fetch ALL of them (newest
+  // first) rather than a single LIMIT 1 slot that buries older opens with no
+  // count or signal.
   const opens = db.prepare("SELECT * FROM handoffs WHERE status = 'open' ORDER BY id DESC").all();
   if (opens.length === 0) return;
 
@@ -466,7 +468,7 @@ function contextDefault(pebblDir, db) {
   showCompactionNotifications(db, pebblDir);
 }
 
-// ── mode: full (legacy flat list, activated via --full) ─────────────────────
+// ── mode: flat filtered list (activated via --cat / --tier / --source) ──────
 
 function contextFull(pebblDir, db, flags) {
   const cwd = process.cwd();
@@ -513,11 +515,11 @@ function contextFull(pebblDir, db, flags) {
   }
   out('---');
 
-  // NO recordAccess here (FIX 1). --full is a broad memory dump (up to 10 rows,
-  // optionally filtered), the session-start "show me everything" view — not a
-  // targeted retrieval of a specific entry. Counting it would inflate access_count
-  // by print frequency. rerank still reorders this read; only the increment is
-  // gated to intentional lookups (contextTopic).
+  // NO recordAccess here (FIX 1). This is a broad memory dump (up to 10 rows,
+  // filtered by cat/tier/source), a session-start "show me everything" view —
+  // not a targeted retrieval of a specific entry. Counting it would inflate
+  // access_count by print frequency. rerank still reorders this read; only the
+  // increment is gated to intentional lookups (contextTopic).
   showCompactionNotifications(db, pebblDir);
 }
 
@@ -639,8 +641,10 @@ function contextAsOf(pebblDir, db, date, flags) {
 module.exports = function context(args) {
   const parsed = parseArgs(args);
   const { flags } = parsed;
-  // --cap <n>: a positive integer. Anything else errors out loud rather than
-  // parsing to NaN and silently lifting the cap.
+  // A value flag with no value (`--cap`, `--cap=`, `--topic`) errors out loud
+  // instead of silently rendering the default view; --cap <n> must be a positive
+  // integer, so a bad value never parses to NaN and silently lifts the cap.
+  assertCompleteFlags(parsed);
   assertIntegerFlags(parsed, ['cap']);
   if (flags.cap !== undefined && parseInt(flags.cap, 10) < 1) {
     console.error(`pebbl: --cap expects a positive integer, got "${flags.cap}"`);

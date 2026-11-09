@@ -275,8 +275,8 @@ module.exports.validAsOf = validAsOf;
 //   - context.js contextTopic: `pebbl context --topic <x>`. This is the user
 //     asking "what do we know about X" and getting that topic's entries — a
 //     genuine retrieval. It calls recordAccess on exactly the ids it returned.
-//   - contextDefault (the plain `pebbl context` dump) and contextFull (`--full`,
-//     and the cat/tier/source-filtered dump that falls through to it) DELIBERATELY
+//   - contextDefault (the plain `pebbl context` dump, capped or --full) and
+//     contextFull (the cat/tier/source-filtered flat dump) DELIBERATELY
 //     do NOT call this. They are broad session-start renders; counting the rows
 //     they PRINT would make access_count track print-frequency, a rich-get-richer
 //     loop that pollutes the usage signal. rerank still ORDERS those reads by

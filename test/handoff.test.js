@@ -881,9 +881,26 @@ describe('handoff - carried todos stay within the caps', () => {
     assert.equal(todos.length, 3);
     const clipped = todos.find((t) => t.startsWith('from #1: decide'));
     assert.ok(clipped, latest(d).todo);
-    assert.equal(clipped.length, 160);
+    // The clip is on the item text; the "from #1: " prefix rides on top of it.
+    assert.equal(clipped.slice('from #1: '.length).length, 160);
     assert.ok(clipped.endsWith('…'));
     assert.match(r.stdout, /clipped to 160 chars; the full text is in the handoff it names/);
+  });
+
+  it('carries an item that fit the cap WHOLE, so its trailing pointer survives', () => {
+    const d = project();
+    // 156 chars, pointer at the end: clipping the prefixed string (165 chars) used
+    // to back up before the "(" and drop the pointer, the one part that mattered.
+    const item = 'decide the gate question with the owner, the visual check vs the numeric one, ' +
+      'then wire the result into the pipeline step that runs nightly (docs/14.02 §3)';
+    assert.ok(item.length > 150 && item.length <= 160, `item is ${item.length} chars`);
+    const r1 = runHandoff(d, ['first wake', '--todo', item]);
+    assert.equal(r1.status, 0, r1.stderr);
+    const r2 = runHandoff(d, ['second wake', '--todo', 'new one']);
+    assert.equal(r2.status, 0, r2.stderr);
+    const todos = splitItems(latest(d).todo);
+    assert.ok(todos.includes(`from #1: ${item}`), latest(d).todo);
+    assert.doesNotMatch(r2.stdout, /clipped/);
   });
 });
 

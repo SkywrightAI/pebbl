@@ -108,7 +108,7 @@ describe('pebbl context is capped and ordered handoff -> decisions -> the rest',
     assert.match(out, /NARRATIVE-MARKER/);
   });
 
-  it('--cap <n> moves the cap; a non-integer or non-positive value is refused', () => {
+  it('--cap <n> moves the cap; a non-integer, non-positive or missing value is refused', () => {
     const dir = seededProject();
     const r = run(dir, ['--cap', '1500']);
     assert.equal(r.status, 0, r.stderr);
@@ -116,6 +116,11 @@ describe('pebbl context is capped and ordered handoff -> decisions -> the rest',
     assert.match(r.stdout, /capped at 1500 chars/);
     assert.equal(run(dir, ['--cap', 'abc']).status, 1);
     assert.equal(run(dir, ['--cap', '0']).status, 1);
+    // No value must not fall back to the default cap in silence.
+    const bare = run(dir, ['--cap']);
+    assert.equal(bare.status, 1);
+    assert.match(bare.stderr, /--cap expects a value/);
+    assert.equal(run(dir, ['--cap=']).status, 1);
   });
 
   it('a store that fits is printed whole, with no cap note', () => {

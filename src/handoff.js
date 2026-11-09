@@ -32,8 +32,11 @@ const DETAIL_DOC_THRESHOLD = 1200;
 // line that points somewhere" rule, hold 2-3 items of a line each. Refused at
 // write time, before the insert, like the other guards. Carried todos count
 // toward the todo cap too, so the field stays bounded across a chain of
-// handoffs; an over-long legacy item carries clipped (its full text stays in
-// the handoff it came from, which the "from #N:" prefix names).
+// handoffs; an over-long legacy item carries with its text clipped. The clip is
+// on the item text, after the "from #N: " prefix, so an item pebbl accepted
+// carries whole and keeps its trailing pointer (clipping the prefixed string
+// cut "(docs/14.02 §3)" off a 156-char item); the full text stays in the
+// handoff the prefix names.
 const MAX_ITEMS = 8;
 const MAX_ITEM_CHARS = 160;
 const POINT_SOMEWHERE =
@@ -305,7 +308,7 @@ module.exports = function handoff(args) {
   const priors = flags['keep-open']
     ? []
     : db.prepare("SELECT * FROM handoffs WHERE status = 'open' ORDER BY id ASC").all();
-  const carried = carriedTodos(priors, [done, todo]).map((c) => clipItem(c, MAX_ITEM_CHARS));
+  const carried = carriedTodos(priors, [done, todo], MAX_ITEM_CHARS);
   const newTodos = splitItems(todo).length;
   if (newTodos + carried.length > MAX_ITEMS) {
     const ids = priors.map((p) => `#${p.id}`).join(', ');
@@ -410,12 +413,15 @@ function appendHandoffEvents(pebblDir, events) {
 // each as "from #N: item" (N = the handoff the item FIRST appeared in, so an
 // item carried twice keeps its origin). An item counts as accounted for when
 // the new --done or --todo has an item equal to it, or containing it, after
-// normalizing case and punctuation. Duplicates across priors carry once.
+// normalizing case and punctuation. Duplicates across priors carry once. With
+// maxChars, the item TEXT is clipped to that many chars (clipItem) before the
+// prefix goes on: a pre-cap legacy item carries bounded, an item that fit the
+// cap carries whole, pointer and all.
 const CARRIED_RE = /^from #(\d+):\s*/i;
 function normItem(s) {
   return String(s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
-function carriedTodos(priors, newFields) {
+function carriedTodos(priors, newFields, maxChars) {
   const listed = newFields.flatMap((f) => splitItems(f)).map((i) => normItem(i.replace(CARRIED_RE, '')));
   const covered = (n) => listed.some((l) => l === n || (n.length >= 8 && l.includes(n)) || (l.length >= 8 && n.includes(l)));
   const out = [];
@@ -428,7 +434,7 @@ function carriedTodos(priors, newFields) {
       const n = normItem(base);
       if (!n || covered(n) || seen.has(n)) continue;
       seen.add(n);
-      out.push(`from #${origin}: ${base}`);
+      out.push(`from #${origin}: ${maxChars ? clipItem(base, maxChars) : base}`);
     }
   }
   return out;
