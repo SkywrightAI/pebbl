@@ -45,6 +45,46 @@ describe('privacy-scan — network class (a)', () => {
   it('does NOT match an out-of-range octet like 999.1.1.1', () => {
     assert.equal(scan('not an ip 999.1.1.1').filter((h) => h.class === 'network').length, 0);
   });
+
+  it('recognizes numbered document paths in links, catalog attributes, and metadata', () => {
+    for (const reference of [
+      '`125.26.11.04-meridian-sync.md`',
+      '[notes](../Meetings/125.26.11.04-meridian-sync.md)',
+      '<a href="003.26.10.13-showcase.html">',
+      '<a href="../Meetings/125.26.11.04-meridian-sync.md">125.26.11.04 meridian sync</a>',
+      '{"source":"Docs/01.24.02.29-workshop.pdf"}',
+      '[wiki](01.26.11.05-workshop/README.md)',
+      'https://example.org/docs/125.26.11.04-meridian-sync.md',
+    ]) assert.deepEqual(scan(reference), [], reference);
+  });
+
+  it('still flags bare addresses, ports, CIDRs, URL authorities and lookalikes', () => {
+    const dateShapedIp = ['125', '26', '11', '04'].join('.');
+    for (const reference of [
+      `host: ${dateShapedIp}`,
+      `host=${dateShapedIp}:443`,
+      `cidr: ${dateShapedIp}/24`,
+      `https://${dateShapedIp}-review.md/path`,
+      `//${dateShapedIp}-review.md/path`,
+      `ssh://user@${dateShapedIp}-review.md/path`,
+      `prefix-${dateShapedIp}-review.md`,
+      `docs/${dateShapedIp}-review.md.bak`,
+      `docs/${dateShapedIp}-review`,
+      `<a href="docs/125.26.11.05-other.md">${dateShapedIp} review</a>`,
+      'docs/125.26.02.29-review.md',
+      'docs/125.26.04.31-review.md',
+    ]) assert.equal(scan(reference).filter((h) => h.class === 'network').length, 1, reference);
+  });
+
+  it('preserves IP, credential, token and name findings next to a dated document link', () => {
+    const ip = [8, 8, 8, 8].join('.');
+    const credential = ['config/', '.env'].join('');
+    const token = ['ghp_', '0123456789abcdefghijABCDEFGHIJ0123'].join('');
+    const line = `https://${ip}:443/docs/125.26.11.04-meridian-sync.md ${credential} ${token} Test Person`;
+    const hits = scan(line, { denylist: ['Test Person'] });
+    assert.deepEqual(hits.map((h) => h.class).sort(), ['cred-path', 'name', 'network', 'token']);
+    assert.equal(hits.find((h) => h.class === 'network').match, `${ip}:443`);
+  });
 });
 
 describe('privacy-scan — credential-path class (b)', () => {
@@ -68,6 +108,25 @@ describe('privacy-scan — credential-path class (b)', () => {
   it('reports a path once (overlapping patterns are deduped)', () => {
     const hits = scan('/etc/factory-updates-bot.env').filter((h) => h.class === 'cred-path');
     assert.equal(hits.length, 1);
+  });
+
+  it('recognizes only the exact public AWS documentation article', () => {
+    const article = ['AWSHowTo.secrets', 'env-vars.html'].join('.');
+    const dir = '/elasticbeanstalk/latest/dg/';
+    const url = `https://docs.aws.amazon.com${dir}${article}`;
+    assert.deepEqual(scan(`[AWS docs](${url}). Also see ${url}.`), []);
+    for (const lookalike of [
+      `${dir}${article}`,
+      `https://example.org${dir}${article}`,
+      `https://docs.aws.amazon.com.example.org${dir}${article}`,
+      `https://example.org/?url=${url}`,
+      `${url}/extra`,
+      `${url}?extra=1`,
+    ]) assert.ok(scan(lookalike).some((h) => h.class === 'cred-path'), lookalike);
+
+    const localPath = ['config/', '.env'].join('');
+    assert.deepEqual(scan(`${url} ${localPath}`).map((h) => h.match), [localPath]);
+    assert.deepEqual(scan(`${localPath} ${url}`).map((h) => h.match), [localPath]);
   });
 });
 

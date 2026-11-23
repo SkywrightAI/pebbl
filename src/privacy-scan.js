@@ -75,6 +75,29 @@ function isPrivateIp(a, b, c, d) {
   return false;
 }
 
+// Numbered document paths use NN[N].YY.MM.DD-slug, not a bare dotted date.
+// Classify just that prefix, never URLs, lines, or metadata fields as a whole.
+function isDatedDocumentPrefix(text, match) {
+  const [, ordinal, yy, mm, dd] = match;
+  if (ordinal.length < 2 || [yy, mm, dd].some((part) => part.length !== 2)) return false;
+  const before = text.slice(0, match.index);
+  if (before && !/[\s/"'`(=<>]$/.test(before)) return false;
+  // A slash is also how URL authorities start; don't treat a host as a path.
+  if (/(?:^|[\s"'`(=<>])(?:[a-z][a-z\d+.-]*:)?\/\/[^/\s"'`(=<>]*$/i.test(before)) return false;
+  const after = text.slice(match.index + match[0].length);
+  const isPath = /^-[a-z][a-z\d-]*(?:\.(?:md|html|pdf)(?=$|[\s"'`),;<>?#\]}]|\.(?=$|\s))|\/)/i.test(after);
+  // Generated catalog labels repeat the ID without its slug. Require an
+  // immediately preceding anchor with a matching relative document target.
+  const labelTarget = !isPath && /^\s+[a-z]/i.test(after) &&
+    /<a\s+href="((?!\/\/|[a-z][a-z\d+.-]*:)[\w./-]+)"\s*>$/i.exec(before);
+  if (!isPath && !(labelTarget &&
+      labelTarget[1].split('/').pop().match(/^(\d{2,3}(?:\.\d{2}){3})-[a-z][a-z\d-]*\.(?:md|html|pdf)$/i)?.[1] === match[0])) return false;
+  const month = Number(mm);
+  const day = Number(dd);
+  const date = new Date(Date.UTC(2000 + Number(yy), month - 1, day));
+  return date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
 // Find every non-private IPv4 in the text, with an optional :port suffix.
 // Returns [{ ip, port, index }].
 function findPublicIps(text) {
@@ -88,6 +111,7 @@ function findPublicIps(text) {
     const d = Number(m[4]);
     if (![a, b, c, d].every(isValidOctet)) continue; // not a real IPv4
     if (isPrivateIp(a, b, c, d)) continue;           // RFC1918 / loopback — fine
+    if (isDatedDocumentPrefix(text, m)) continue;
     // optional :port immediately after the address
     const after = text.slice(m.index + m[0].length);
     const portMatch = /^:(\d{1,5})\b/.exec(after);
@@ -116,6 +140,10 @@ const CRED_PATH_PATTERNS = [
 ];
 
 function findCredPaths(text) {
+  // The exact AWS public documentation article is not an environment file.
+  // Mask only for this detector, preserving offsets and neighboring findings.
+  text = text.replace(/(^|[\s"'`(<])(https:\/\/docs\.aws\.amazon\.com\/elasticbeanstalk\/latest\/dg\/AWSHowTo\.secrets\.env-vars\.html)(?=$|[\s"'`)>\]]|[.,;](?=$|\s))/g,
+    (_match, before, url) => before + ' '.repeat(url.length));
   const raw = [];
   for (const re of CRED_PATH_PATTERNS) {
     const m = re.exec(text);
